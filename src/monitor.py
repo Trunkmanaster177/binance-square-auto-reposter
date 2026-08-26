@@ -6,6 +6,10 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 
+# ============================================================
+# CONFIG
+# ============================================================
+
 SOURCE_AUTHOR = os.getenv("SOURCE_AUTHOR", "TF_bnb")
 
 FEED_URL = (
@@ -38,16 +42,24 @@ HEADERS = {
 def load_state():
 
     if not STATE_FILE.exists():
+
         return {
             "initialized": False,
             "processed_ids": []
         }
 
     try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
+
+        with open(
+            STATE_FILE,
+            "r",
+            encoding="utf-8"
+        ) as f:
+
             return json.load(f)
 
     except Exception:
+
         return {
             "initialized": False,
             "processed_ids": []
@@ -61,9 +73,13 @@ def save_state(state):
         exist_ok=True
     )
 
+    # Remove duplicate IDs
     state["processed_ids"] = list(
         dict.fromkeys(
-            state.get("processed_ids", [])
+            state.get(
+                "processed_ids",
+                []
+            )
         )
     )[-500:]
 
@@ -82,7 +98,7 @@ def save_state(state):
 
 
 # ============================================================
-# FETCH FEED
+# FETCH BINANCE SQUARE
 # ============================================================
 
 def get_latest_posts():
@@ -107,9 +123,29 @@ def get_latest_posts():
         response.status_code
     )
 
+    print(
+        "Final URL:",
+        response.url
+    )
+
     response.raise_for_status()
 
-    data = response.json()
+    try:
+
+        data = response.json()
+
+    except Exception as e:
+
+        print(
+            "JSON parsing failed:",
+            e
+        )
+
+        print(
+            response.text[:5000]
+        )
+
+        return []
 
     if data.get("code") != "000000":
 
@@ -120,9 +156,15 @@ def get_latest_posts():
 
         return []
 
-    data_section = data.get("data", {})
+    data_section = data.get(
+        "data",
+        {}
+    )
 
-    vos = data_section.get("vos", [])
+    vos = data_section.get(
+        "vos",
+        []
+    )
 
     print(
         "Objects returned in data.vos:",
@@ -140,36 +182,101 @@ def get_latest_posts():
 
         posts.extend(found)
 
-    # Remove duplicate post IDs
+    # --------------------------------------------------------
+    # REMOVE DUPLICATES
+    # --------------------------------------------------------
 
-    unique = {}
+    unique_posts = {}
 
     for post in posts:
 
         post_id = str(
-            post.get("id", "")
+            post.get(
+                "id",
+                ""
+            )
         ).strip()
 
         if post_id:
-            unique[post_id] = post
 
-    posts = list(unique.values())
+            unique_posts[post_id] = post
+
+    posts = list(
+        unique_posts.values()
+    )
 
     print(
         "Actual post objects found:",
         len(posts)
     )
 
-    # Debug output
+    # --------------------------------------------------------
+    # DEBUG AUTHOR INFORMATION
+    # --------------------------------------------------------
 
-    for post in posts[:5]:
+    print()
+    print(
+        "========== AUTHOR DEBUG =========="
+    )
+
+    for post in posts:
+
+        print()
+        print(
+            "POST ID:",
+            repr(post.get("id"))
+        )
 
         print(
-            "POST:",
-            post.get("id"),
-            "| AUTHOR:",
-            post.get("authorName")
+            "authorName:",
+            repr(post.get("authorName"))
         )
+
+        print(
+            "authorId:",
+            repr(post.get("authorId"))
+        )
+
+        print(
+            "userId:",
+            repr(post.get("userId"))
+        )
+
+        print(
+            "username:",
+            repr(post.get("username"))
+        )
+
+        print(
+            "handle:",
+            repr(post.get("handle"))
+        )
+
+        print(
+            "nickname:",
+            repr(post.get("nickname"))
+        )
+
+        print(
+            "creatorName:",
+            repr(post.get("creatorName"))
+        )
+
+        print(
+            "creatorId:",
+            repr(post.get("creatorId"))
+        )
+
+        print(
+            "webLink:",
+            repr(post.get("webLink"))
+        )
+
+    print()
+    print(
+        "========== END AUTHOR DEBUG =========="
+    )
+    print()
 
     return posts
 
@@ -178,16 +285,21 @@ def get_latest_posts():
 # FIND REAL POST OBJECTS
 # ============================================================
 
-def find_post_objects(obj, path="root"):
+def find_post_objects(
+    obj,
+    path="root"
+):
 
     results = []
 
-    if isinstance(obj, dict):
+    if isinstance(
+        obj,
+        dict
+    ):
 
-        keys = set(obj.keys())
-
-        # A real Square post normally contains several
-        # of these fields.
+        keys = set(
+            obj.keys()
+        )
 
         post_markers = {
             "id",
@@ -198,16 +310,20 @@ def find_post_objects(obj, path="root"):
         }
 
         matches = len(
-            keys.intersection(post_markers)
+            keys.intersection(
+                post_markers
+            )
         )
 
-        # Require ID + at least one other post field.
+        # Require ID + another post field
         if (
             "id" in keys
             and matches >= 2
         ):
 
-            results.append(obj)
+            results.append(
+                obj
+            )
 
             print(
                 "Post object found at:",
@@ -216,7 +332,7 @@ def find_post_objects(obj, path="root"):
 
             return results
 
-        # Otherwise continue searching nested objects.
+        # Continue searching nested data
 
         for key, value in obj.items():
 
@@ -227,7 +343,10 @@ def find_post_objects(obj, path="root"):
                 )
             )
 
-    elif isinstance(obj, list):
+    elif isinstance(
+        obj,
+        list
+    ):
 
         for index, value in enumerate(obj):
 
@@ -247,26 +366,56 @@ def find_post_objects(obj, path="root"):
 
 def is_source_post(post):
 
-    target = SOURCE_AUTHOR.lower().lstrip("@")
+    target = (
+        SOURCE_AUTHOR
+        .lower()
+        .strip()
+        .lstrip("@")
+    )
 
     possible_names = [
-        post.get("authorName"),
-        post.get("authorHandle"),
-        post.get("username"),
-        post.get("handle"),
-        post.get("nickname")
+
+        post.get(
+            "authorName"
+        ),
+
+        post.get(
+            "authorHandle"
+        ),
+
+        post.get(
+            "username"
+        ),
+
+        post.get(
+            "handle"
+        ),
+
+        post.get(
+            "nickname"
+        ),
+
+        post.get(
+            "creatorName"
+        )
+
     ]
 
     for value in possible_names:
 
-        if value:
+        if not value:
+            continue
 
-            value = str(
-                value
-            ).strip().lower().lstrip("@")
+        value = (
+            str(value)
+            .strip()
+            .lower()
+            .lstrip("@")
+        )
 
-            if value == target:
-                return True
+        if value == target:
+
+            return True
 
     return False
 
@@ -278,43 +427,66 @@ def is_source_post(post):
 def extract_post(post):
 
     return {
+
         "id": str(
-            post.get("id", "")
+            post.get(
+                "id",
+                ""
+            )
         ).strip(),
 
         "authorName": str(
-            post.get("authorName", "")
+            post.get(
+                "authorName",
+                ""
+            )
         ).strip(),
 
         "title": str(
-            post.get("title") or ""
+            post.get(
+                "title"
+            ) or ""
         ).strip(),
 
         "content": str(
-            post.get("content") or ""
+            post.get(
+                "content"
+            ) or ""
         ).strip(),
 
         "webLink": str(
-            post.get("webLink") or ""
+            post.get(
+                "webLink"
+            ) or ""
         ).strip(),
 
-        "images": post.get(
-            "images"
-        ) or [],
+        "images": (
+            post.get(
+                "images"
+            )
+            or []
+        ),
 
-        "hashtags": post.get(
-            "hashtagList"
-        ) or []
+        "hashtags": (
+            post.get(
+                "hashtagList"
+            )
+            or []
+        )
+
     }
 
 
 # ============================================================
-# BUILD REPOST
+# BUILD REPOST TEXT
 # ============================================================
 
 def build_repost_text(post):
 
-    content = post["content"]
+    content = post.get(
+        "content",
+        ""
+    )
 
     if not content:
 
@@ -326,13 +498,14 @@ def build_repost_text(post):
         f"\n\nSource: @{SOURCE_AUTHOR}"
     )
 
-    if post["webLink"]:
+    if post.get("webLink"):
 
         text += (
-            f"\nOriginal: {post['webLink']}"
+            "\nOriginal: "
+            + post["webLink"]
         )
 
-    # Safe maximum
+    # Safety limit
 
     if len(text) > 8000:
 
@@ -346,7 +519,7 @@ def build_repost_text(post):
 
 
 # ============================================================
-# PUBLISH
+# PUBLISH TO BINANCE SQUARE
 # ============================================================
 
 def publish_to_square(text):
@@ -358,22 +531,34 @@ def publish_to_square(text):
     if not api_key:
 
         print(
-            "ERROR: BINANCE_SQUARE_OPENAPI_KEY "
+            "ERROR: "
+            "BINANCE_SQUARE_OPENAPI_KEY "
             "secret is missing."
         )
 
         return False
 
     headers = {
-        "X-Square-OpenAPI-Key": api_key,
-        "Content-Type": "application/json",
-        "User-Agent": HEADERS["User-Agent"]
+
+        "X-Square-OpenAPI-Key":
+            api_key,
+
+        "Content-Type":
+            "application/json",
+
+        "User-Agent":
+            HEADERS["User-Agent"]
+
     }
 
     payload = {
-        "bodyTextOnly": text
+
+        "bodyTextOnly":
+            text
+
     }
 
+    print()
     print(
         "Publishing to Binance Square..."
     )
@@ -397,10 +582,18 @@ def publish_to_square(text):
     except Exception:
 
         print(
-            response.text
+            "Non-JSON response:"
+        )
+
+        print(
+            response.text[:5000]
         )
 
         return False
+
+    print(
+        "Publish response:"
+    )
 
     print(
         json.dumps(
@@ -411,16 +604,23 @@ def publish_to_square(text):
     )
 
     if not response.ok:
+
         return False
 
-    code = result.get("code")
+    code = result.get(
+        "code"
+    )
 
-    return code in (
+    if code in (
         None,
         "000000",
         200,
         "200"
-    )
+    ):
+
+        return True
+
+    return False
 
 
 # ============================================================
@@ -429,18 +629,24 @@ def publish_to_square(text):
 
 def main():
 
-    print("=" * 60)
+    print(
+        "=" * 60
+    )
 
     print(
         "Binance Square Auto Reposter"
     )
 
-    print("=" * 60)
+    print(
+        "=" * 60
+    )
 
     print(
         "Source creator:",
         SOURCE_AUTHOR
     )
+
+    print()
 
     state = load_state()
 
@@ -454,27 +660,37 @@ def main():
 
         return
 
+    # --------------------------------------------------------
+    # FILTER SOURCE
+    # --------------------------------------------------------
+
     source_posts = []
 
     for post in posts:
 
-        if is_source_post(post):
+        if is_source_post(
+            post
+        ):
 
             source_posts.append(
                 extract_post(post)
             )
 
+    print()
     print(
         f"Found {len(source_posts)} "
         f"post(s) from {SOURCE_AUTHOR}"
     )
 
-    # ========================================================
+    # --------------------------------------------------------
     # FIRST RUN
-    # ========================================================
+    # --------------------------------------------------------
 
-    if not state.get("initialized"):
+    if not state.get(
+        "initialized"
+    ):
 
+        print()
         print(
             "FIRST RUN: initializing state."
         )
@@ -483,16 +699,23 @@ def main():
 
             if post["id"]:
 
-                state["processed_ids"].append(
+                state[
+                    "processed_ids"
+                ].append(
                     post["id"]
                 )
 
-        state["initialized"] = True
+        state[
+            "initialized"
+        ] = True
 
-        save_state(state)
+        save_state(
+            state
+        )
 
         print(
-            "Existing posts marked as processed."
+            "Existing posts marked "
+            "as processed."
         )
 
         print(
@@ -502,9 +725,9 @@ def main():
 
         return
 
-    # ========================================================
-    # NEW POSTS
-    # ========================================================
+    # --------------------------------------------------------
+    # FIND NEW POSTS
+    # --------------------------------------------------------
 
     processed = set(
         state.get(
@@ -513,23 +736,33 @@ def main():
         )
     )
 
-    new_posts = [
-        post
-        for post in source_posts
-        if post["id"]
-        and post["id"] not in processed
-    ]
+    new_posts = []
+
+    for post in source_posts:
+
+        if (
+            post["id"]
+            and post["id"]
+            not in processed
+        ):
+
+            new_posts.append(
+                post
+            )
 
     if not new_posts:
 
+        print()
         print(
             "No new posts."
         )
 
         return
 
+    print()
     print(
-        f"NEW POSTS: {len(new_posts)}"
+        f"NEW POSTS FOUND: "
+        f"{len(new_posts)}"
     )
 
     # Oldest first
@@ -538,12 +771,13 @@ def main():
 
     for post in new_posts:
 
+        print()
         print(
             "-" * 60
         )
 
         print(
-            "Post:",
+            "Post ID:",
             post["id"]
         )
 
@@ -553,12 +787,17 @@ def main():
         )
 
         print(
-            "Text:",
-            post["content"][:300]
+            "Content:"
         )
 
-        repost_text = build_repost_text(
-            post
+        print(
+            post["content"][:500]
+        )
+
+        repost_text = (
+            build_repost_text(
+                post
+            )
         )
 
         if not repost_text:
@@ -573,12 +812,15 @@ def main():
 
             continue
 
-        success = publish_to_square(
-            repost_text
+        success = (
+            publish_to_square(
+                repost_text
+            )
         )
 
         if success:
 
+            print()
             print(
                 "POSTED SUCCESSFULLY"
             )
@@ -587,29 +829,39 @@ def main():
                 post["id"]
             )
 
-            state["processed_ids"] = list(
+            state[
+                "processed_ids"
+            ] = list(
                 processed
             )
 
-            save_state(state)
+            save_state(
+                state
+            )
 
         else:
 
+            print()
             print(
                 "POST FAILED"
             )
 
-            # Don't mark it as processed.
+            # Don't mark as processed.
             # It will retry next run.
 
             break
 
-    state["processed_ids"] = list(
+    state[
+        "processed_ids"
+    ] = list(
         processed
     )
 
-    save_state(state)
+    save_state(
+        state
+    )
 
+    print()
     print(
         "Finished:",
         datetime.now(
@@ -617,6 +869,10 @@ def main():
         ).isoformat()
     )
 
+
+# ============================================================
+# START
+# ============================================================
 
 if __name__ == "__main__":
 
@@ -626,6 +882,7 @@ if __name__ == "__main__":
 
     except Exception as e:
 
+        print()
         print(
             "FATAL ERROR:",
             repr(e)
