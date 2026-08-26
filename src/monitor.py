@@ -81,7 +81,7 @@ def get_latest_posts():
 
     params = {
         "pageIndex": 1,
-        "pageSize": PAGE_SIZE,
+        "pageSize": 20,
         "type": 2
     }
 
@@ -94,41 +94,78 @@ def get_latest_posts():
         timeout=30
     )
 
+    print("HTTP status:", response.status_code)
+    print("Final URL:", response.url)
+    print("Content-Type:", response.headers.get("content-type"))
+
+    print("\n========== RAW RESPONSE ==========")
+    print(response.text[:10000])
+    print("========== END RESPONSE ==========\n")
+
     response.raise_for_status()
 
-    data = response.json()
+    try:
+        data = response.json()
+    except Exception as e:
+        print("JSON parsing failed:", e)
+        return []
 
-    # Binance/community endpoint formats can change.
-    # Try common response structures.
-
-    posts = []
+    print("\n========== JSON TYPE ==========")
+    print(type(data))
 
     if isinstance(data, dict):
+        print("JSON keys:", list(data.keys()))
 
-        data_section = data.get("data")
+    print("========== END JSON INFO ==========\n")
 
-        if isinstance(data_section, list):
-            posts = data_section
+    return extract_posts_from_response(data)
 
-        elif isinstance(data_section, dict):
 
-            for key in (
-                "list",
-                "articles",
-                "items",
-                "data"
-            ):
-                value = data_section.get(key)
+def extract_posts_from_response(data):
 
-                if isinstance(value, list):
-                    posts = value
-                    break
+    candidates = []
 
-    if not posts:
-        print("No posts found in response.")
+    def scan(obj, path="root"):
 
-    return posts
+        if isinstance(obj, list):
 
+            if obj and isinstance(obj[0], dict):
+
+                keys = set(obj[0].keys())
+
+                interesting = {
+                    "id",
+                    "authorName",
+                    "content",
+                    "webLink",
+                    "images"
+                }
+
+                if keys.intersection(interesting):
+
+                    print(
+                        "Possible post list found at:",
+                        path
+                    )
+
+                    candidates.extend(obj)
+
+            for i, item in enumerate(obj[:10]):
+                scan(item, f"{path}[{i}]")
+
+        elif isinstance(obj, dict):
+
+            for key, value in obj.items():
+                scan(value, f"{path}.{key}")
+
+    scan(data)
+
+    print(
+        "Candidate posts found:",
+        len(candidates)
+    )
+
+    return candidates
 
 # ============================================================
 # FILTER SOURCE CREATOR
