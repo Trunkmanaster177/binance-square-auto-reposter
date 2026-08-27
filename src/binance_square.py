@@ -52,3 +52,216 @@ def download_image(url, directory, index):
     path.write_bytes(response.content)
 
     return path
+
+
+def presign_image(path):
+    check_key()
+
+    endpoint = (
+        BASE
+        + "/bapi/composite/v2/public/pgc/openApi/image/presignedUrl"
+    )
+
+    response = requests.post(
+        endpoint,
+        headers=HEADERS,
+        json={
+            "imageName": path.name
+        },
+        timeout=30
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    if data.get("code") not in ("000000", 0, None):
+        raise RuntimeError(
+            f"Binance presign failed: {data}"
+        )
+
+    payload = data.get("data") or {}
+
+    presigned_url = payload.get("presignedUrl")
+    file_ticket = payload.get("fileTicket")
+
+    if not presigned_url:
+        raise RuntimeError(
+            f"No presignedUrl returned: {data}"
+        )
+
+    if not file_ticket:
+        raise RuntimeError(
+            f"No fileTicket returned: {data}"
+        )
+
+    return presigned_url, file_ticket
+
+
+def upload_image(path, presigned_url):
+    content_type = (
+        mimetypes.guess_type(path.name)[0]
+        or "image/jpeg"
+    )
+
+    with open(path, "rb") as f:
+        response = requests.put(
+            presigned_url,
+            data=f,
+            headers={
+                "Content-Type": content_type
+            },
+            timeout=120
+        )
+
+    response.raise_for_status()
+
+
+def wait_for_image(file_ticket):
+    check_key()
+
+    endpoint = (
+        BASE
+        + "/bapi/composite/v2/public/pgc/openApi/image/imageStatus"
+    )
+
+    for attempt in range(10):
+        response = requests.post(
+            endpoint,
+            headers=HEADERS,
+            json={
+                "fileTicket": file_ticket
+            },
+            timeout=30
+        )
+
+        response.raise_for_status()
+
+        data = response.json()
+        payload = data.get("data") or {}
+        status = payload.get("status")
+
+        print(
+            f"Image processing: "
+            f"{attempt + 1}/10 status={status}"
+        )
+
+        if status == 1:
+            image_url = (
+                payload.get("imageUrl")
+                or payload.get("url")
+            )
+
+            if not image_url:
+                raise RuntimeError(
+                    f"Image processed but URL missing: {data}"
+                )
+
+            return image_url
+
+        time.sleep(3)
+
+    raise RuntimeError(
+        "Image processing timed out."
+    )
+
+
+def upload_one_image(path):
+    print(
+        f"Uploading image: {path.name}"
+    )
+
+    presigned_url, file_ticket = presign_image(path)
+
+    upload_image(
+        path,
+        presigned_url
+    )
+
+    return wait_for_image(
+        file_ticket
+    )
+
+
+def publish_text(text):
+    check_key()
+
+    endpoint = (
+        BASE
+        + "/bapi/composite/v1/public/pgc/openApi/content/add"
+    )
+
+    payload = {
+        "contentType": 1,
+        "bodyTextOnly": text,
+        "isPublish": True
+    }
+
+    response = requests.post(
+        endpoint,
+        headers=HEADERS,
+        json=payload,
+        timeout=60
+    )
+
+    print(
+        "Publish HTTP:",
+        response.status_code
+    )
+
+    data = response.json()
+
+    print(
+        "Publish response:",
+        data
+    )
+
+    if response.ok:
+        return data
+
+    return None
+
+
+def publish_images(text, image_urls):
+    check_key()
+
+    if not image_urls:
+        return publish_text(text)
+
+    image_urls = image_urls[:4]
+
+    endpoint = (
+        BASE
+        + "/bapi/composite/v1/public/pgc/openApi/content/add"
+    )
+
+    payload = {
+        "contentType": 1,
+        "bodyTextOnly": text,
+        "imageList": image_urls,
+        "isPublish": True
+    }
+
+    response = requests.post(
+        endpoint,
+        headers=HEADERS,
+        json=payload,
+        timeout=60
+    )
+
+    print(
+        "Publish HTTP:",
+        response.status_code
+    )
+
+    data = response.json()
+
+    print(
+        "Publish response:",
+        data
+    )
+
+    if response.ok:
+        return data
+
+    return None
