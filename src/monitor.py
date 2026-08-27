@@ -1,611 +1,281 @@
 import os
-import json
-import sys
 import time
+import mimetypes
 from pathlib import Path
-from datetime import datetime, timezone
 
-from playwright.sync_api import sync_playwright
-
-
-# ============================================================
-# CONFIG
-# ============================================================
-
-SOURCE_AUTHOR = os.getenv("SOURCE_AUTHOR", "TF_bnb")
-
-PROFILE_URL = (
-    "https://www.binance.com/en/square/profile/"
-    + SOURCE_AUTHOR
-)
-
-STATE_FILE = Path("src/state.json")
+import requests
 
 
-# ============================================================
-# STATE
-# ============================================================
+API_KEY = os.environ.get("BINANCE_SQUARE_OPENAPI_KEY")
 
-def load_state():
+BASE = "https://www.binance.com"
 
-    if not STATE_FILE.exists():
+HEADERS = {
+    "X-Square-OpenAPI-Key": API_KEY or "",
+    "Content-Type": "application/json",
+    "clienttype": "binanceSkill",
+}
 
-        return {
-            "initialized": False,
-            "processed_ids": []
+
+def check_key():
+    if not API_KEY:
+        raise RuntimeError(
+            "BINANCE_SQUARE_OPENAPI_KEY GitHub Secret is missing."
+        )
+
+
+def download_image(url, directory, index):
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+
+    response = requests.get(
+        url,
+        timeout=30,
+        headers={
+            "User-Agent": "Mozilla/5.0"
         }
-
-    try:
-
-        with open(
-            STATE_FILE,
-            "r",
-            encoding="utf-8"
-        ) as f:
-
-            return json.load(f)
-
-    except Exception:
-
-        return {
-            "initialized": False,
-            "processed_ids": []
-        }
-
-
-def save_state(state):
-
-    STATE_FILE.parent.mkdir(
-        parents=True,
-        exist_ok=True
     )
 
-    state["processed_ids"] = list(
-        dict.fromkeys(
-            state.get(
-                "processed_ids",
-                []
-            )
-        )
-    )[-500:]
+    response.raise_for_status()
 
-    with open(
-        STATE_FILE,
-        "w",
-        encoding="utf-8"
-    ) as f:
-
-        json.dump(
-            state,
-            f,
-            indent=2,
-            ensure_ascii=False
-        )
-
-
-# ============================================================
-# SCRAPE PROFILE WITH BROWSER
-# ============================================================
-
-def scrape_profile():
-
-    print("=" * 60)
-    print("BINANCE SQUARE BROWSER SCRAPER")
-    print("=" * 60)
-
-    print(
-        "Profile:",
-        SOURCE_AUTHOR
+    content_type = response.headers.get(
+        "content-type",
+        "image/jpeg"
     )
 
-    print(
-        "URL:",
-        PROFILE_URL
+    extension = mimetypes.guess_extension(
+        content_type.split(";")[0]
+    ) or ".jpg"
+
+    path = directory / f"image_{index}{extension}"
+
+    path.write_bytes(response.content)
+
+    return path
+
+
+def presign_image(path):
+    filename = path.name
+
+    # Current Square OpenAPI media flow.
+    endpoint = (
+        BASE
+        + "/bapi/composite/v2/public/pgc/openApi/image/presignedUrl"
     )
 
-    with sync_playwright() as p:
-
-        browser = p.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu"
-            ]
-        )
-
-        page = browser.new_page(
-            viewport={
-                "width": 1280,
-                "height": 900
-            },
-
-            user_agent=(
-                "Mozilla/5.0 "
-                "(Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 "
-                "(KHTML, like Gecko) "
-                "Chrome/139.0.0.0 Safari/537.36"
-            )
-        )
-
-        print()
-        print("Opening Binance profile...")
-
-        try:
-
-            page.goto(
-                PROFILE_URL,
-                wait_until="domcontentloaded",
-                timeout=60000
-            )
-
-        except Exception as e:
-
-            print(
-                "Navigation warning:",
-                repr(e)
-            )
-
-        print(
-            "Waiting for Binance Square..."
-        )
-
-        time.sleep(8)
-
-        print(
-            "Current URL:",
-            page.url
-        )
-
-        title = page.title()
-
-        print(
-            "Page title:",
-            repr(title)
-        )
-
-        # ----------------------------------------------------
-        # CHECK AWS WAF
-        # ----------------------------------------------------
-
-        body_text = page.locator(
-            "body"
-        ).inner_text(
-            timeout=10000
-        )
-
-        lower_body = body_text.lower()
-
-        waf_words = [
-            "verify that you're not a robot",
-            "aws waf",
-            "challenge",
-            "javascript is disabled"
-        ]
-
-        if any(
-            word in lower_body
-            for word in waf_words
-        ):
-
-            print()
-            print(
-                "AWS WAF / BOT CHALLENGE DETECTED."
-            )
-
-            print(
-                "GitHub Actions cannot access "
-                "the profile through this browser."
-            )
-
-            print()
-            print(
-                "First 3000 characters:"
-            )
-
-            print(
-                body_text[:3000]
-            )
-
-            browser.close()
-
-            return []
-
-        # ----------------------------------------------------
-        # SCROLL PROFILE
-        # ----------------------------------------------------
-
-        print()
-        print(
-            "Scrolling profile..."
-        )
-
-        for i in range(6):
-
-            page.mouse.wheel(
-                0,
-                2500
-            )
-
-            time.sleep(2)
-
-            print(
-                "Scroll",
-                i + 1,
-                "/ 6"
-            )
-
-        # ----------------------------------------------------
-        # FIND POST LINKS
-        # ----------------------------------------------------
-
-        print()
-        print(
-            "Searching for Square posts..."
-        )
-
-        post_links = page.locator(
-            'a[href*="/square/post/"]'
-        )
-
-        count = post_links.count()
-
-        print(
-            "Post links found:",
-            count
-        )
-
-        posts = {}
-
-        for i in range(count):
-
-            try:
-
-                link = post_links.nth(i)
-
-                href = link.get_attribute(
-                    "href"
-                )
-
-                if not href:
-                    continue
-
-                # --------------------------------------------
-                # EXTRACT POST ID
-                # --------------------------------------------
-
-                parts = href.rstrip(
-                    "/"
-                ).split("/")
-
-                post_id = parts[-1]
-
-                if not post_id.isdigit():
-                    continue
-
-                if post_id in posts:
-                    continue
-
-                # --------------------------------------------
-                # FIND POST CONTAINER
-                # --------------------------------------------
-
-                article = link.locator(
-                    "xpath=ancestor::article[1]"
-                )
-
-                if article.count() == 0:
-
-                    article = link.locator(
-                        "xpath=ancestor::*[self::div][1]"
-                    )
-
-                try:
-
-                    text = article.inner_text(
-                        timeout=3000
-                    )
-
-                except Exception:
-
-                    text = link.inner_text(
-                        timeout=3000
-                    )
-
-                # --------------------------------------------
-                # IMAGES
-                # --------------------------------------------
-
-                images = []
-
-                try:
-
-                    imgs = article.locator(
-                        "img"
-                    )
-
-                    img_count = imgs.count()
-
-                    for j in range(
-                        min(
-                            img_count,
-                            4
-                        )
-                    ):
-
-                        src = imgs.nth(
-                            j
-                        ).get_attribute(
-                            "src"
-                        )
-
-                        if src:
-                            images.append(
-                                src
-                            )
-
-                except Exception:
-                    pass
-
-                if href.startswith("/"):
-
-                    href = (
-                        "https://www.binance.com"
-                        + href
-                    )
-
-                posts[post_id] = {
-
-                    "id": post_id,
-
-                    "webLink": href,
-
-                    "content": text.strip(),
-
-                    "images": images
-
-                }
-
-            except Exception as e:
-
-                print(
-                    "Post extraction error:",
-                    repr(e)
-                )
-
-        browser.close()
-
-        result = list(
-            posts.values()
-        )
-
-        print()
-        print(
-            "Unique posts extracted:",
-            len(result)
-        )
-
-        # ----------------------------------------------------
-        # DEBUG
-        # ----------------------------------------------------
-
-        for post in result[:10]:
-
-            print()
-            print(
-                "POST ID:",
-                post["id"]
-            )
-
-            print(
-                "LINK:",
-                post["webLink"]
-            )
-
-            print(
-                "CONTENT:",
-                post["content"][:500]
-            )
-
-            print(
-                "IMAGES:",
-                len(
-                    post["images"]
-                )
-            )
-
-        return result
-
-
-# ============================================================
-# MAIN
-# ============================================================
-
-def main():
-
-    posts = scrape_profile()
-
-    if not posts:
-
-        print()
-        print(
-            "NO POSTS EXTRACTED."
-        )
-
-        return
-
-    state = load_state()
-
-    processed = set(
-        state.get(
-            "processed_ids",
-            []
-        )
+    response = requests.post(
+        endpoint,
+        headers=HEADERS,
+        json={
+            "imageName": filename
+        },
+        timeout=30
     )
 
-    print()
-    print(
-        "Already processed:",
-        len(processed)
-    )
+    response.raise_for_status()
 
-    new_posts = [
-        post
-        for post in posts
-        if post["id"]
-        not in processed
-    ]
+    data = response.json()
 
-    print(
-        "New posts:",
-        len(new_posts)
-    )
-
-    # --------------------------------------------------------
-    # FIRST RUN
-    # --------------------------------------------------------
-
-    if not state.get(
-        "initialized"
+    if data.get("code") not in (
+        "000000",
+        0,
+        None
     ):
-
-        print()
-        print(
-            "FIRST RUN."
+        raise RuntimeError(
+            f"Binance presign failed: {data}"
         )
 
-        for post in posts:
+    payload = data.get("data") or {}
 
-            processed.add(
-                post["id"]
+    presigned_url = payload.get(
+        "presignedUrl"
+    )
+
+    file_ticket = payload.get(
+        "fileTicket"
+    )
+
+    if not presigned_url:
+        raise RuntimeError(
+            f"No presignedUrl returned: {data}"
+        )
+
+    return presigned_url, file_ticket
+
+
+def upload_image(path, presigned_url):
+    content_type = (
+        mimetypes.guess_type(
+            path.name
+        )[0]
+        or "image/jpeg"
+    )
+
+    with open(path, "rb") as f:
+
+        response = requests.put(
+            presigned_url,
+            data=f,
+            headers={
+                "Content-Type": content_type
+            },
+            timeout=120
+        )
+
+    response.raise_for_status()
+
+
+def wait_for_image(file_ticket):
+    endpoint = (
+        BASE
+        + "/bapi/composite/v2/public/pgc/openApi/image/imageStatus"
+    )
+
+    for attempt in range(10):
+
+        response = requests.post(
+            endpoint,
+            headers=HEADERS,
+            json={
+                "fileTicket": file_ticket
+            },
+            timeout=30
+        )
+
+        response.raise_for_status()
+
+        data = response.json()
+
+        payload = data.get(
+            "data"
+        ) or {}
+
+        status = payload.get(
+            "status"
+        )
+
+        print(
+            f"Image processing: "
+            f"{attempt + 1}/10 status={status}"
+        )
+
+        if status == 1:
+
+            image_url = (
+                payload.get("imageUrl")
+                or payload.get("url")
             )
 
-        state[
-            "processed_ids"
-        ] = list(
-            processed
-        )
+            if not image_url:
+                raise RuntimeError(
+                    f"Image processed but URL missing: {data}"
+                )
 
-        state[
-            "initialized"
-        ] = True
+            return image_url
 
-        save_state(
-            state
-        )
+        time.sleep(3)
 
-        print(
-            "Existing TF_bnb posts "
-            "marked as processed."
-        )
-
-        print(
-            "Future new posts will be "
-            "detected automatically."
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # SHOW NEW POSTS
-    # --------------------------------------------------------
-
-    if not new_posts:
-
-        print()
-        print(
-            "No new TF_bnb posts."
-        )
-
-        return
-
-    print()
-    print(
-        "========== NEW POSTS =========="
-    )
-
-    for post in new_posts:
-
-        print()
-        print(
-            "POST ID:",
-            post["id"]
-        )
-
-        print(
-            "LINK:",
-            post["webLink"]
-        )
-
-        print(
-            "CONTENT:"
-        )
-
-        print(
-            post["content"][:2000]
-        )
-
-        print(
-            "IMAGES:",
-            len(
-                post["images"]
-            )
-        )
-
-    print()
-    print(
-        "================================"
-    )
-
-    # --------------------------------------------------------
-    # IMPORTANT
-    # --------------------------------------------------------
-    #
-    # We intentionally DO NOT mark new posts as processed yet.
-    #
-    # First we confirm that the browser scraper works.
-    # Then we'll connect the Binance Square OpenAPI publisher.
-    #
-
-    print()
-    print(
-        "Browser scraper test complete."
-    )
-
-    print(
-        "New posts were NOT marked processed."
-    )
-
-    print(
-        "This allows us to test safely."
-    )
-
-    print()
-    print(
-        "Finished:",
-        datetime.now(
-            timezone.utc
-        ).isoformat()
+    raise RuntimeError(
+        "Image processing timed out."
     )
 
 
-# ============================================================
-# START
-# ============================================================
+def upload_one_image(path):
 
-if __name__ == "__main__":
+    print(
+        f"Uploading image: {path.name}"
+    )
 
-    try:
+    presigned_url, file_ticket = (
+        presign_image(path)
+    )
 
-        main()
+    upload_image(
+        path,
+        presigned_url
+    )
 
-    except Exception as e:
+    return wait_for_image(
+        file_ticket
+    )
 
-        print()
-        print(
-            "FATAL ERROR:",
-            repr(e)
-        )
 
-        sys.exit(1)
+def publish_text(text):
+
+    check_key()
+
+    endpoint = (
+        BASE
+        + "/bapi/composite/v1/public/pgc/openApi/content/add"
+    )
+
+    payload = {
+        "contentType": 1,
+        "bodyTextOnly": text,
+        "isPublish": True
+    }
+
+    response = requests.post(
+        endpoint,
+        headers=HEADERS,
+        json=payload,
+        timeout=60
+    )
+
+    print(
+        "Publish HTTP:",
+        response.status_code
+    )
+
+    data = response.json()
+
+    print(
+        "Publish response:",
+        data
+    )
+
+    return data
+
+
+def publish_images(text, image_urls):
+
+    check_key()
+
+    if not image_urls:
+        return publish_text(text)
+
+    if len(image_urls) > 4:
+        image_urls = image_urls[:4]
+
+    endpoint = (
+        BASE
+        + "/bapi/composite/v1/public/pgc/openApi/content/add"
+    )
+
+    payload = {
+        "contentType": 1,
+        "bodyTextOnly": text,
+        "imageList": image_urls,
+        "isPublish": True
+    }
+
+    response = requests.post(
+        endpoint,
+        headers=HEADERS,
+        json=payload,
+        timeout=60
+    )
+
+    print(
+        "Publish HTTP:",
+        response.status_code
+    )
+
+    data = response.json()
+
+    print(
+        "Publish response:",
+        data
+    )
+
+    return data
