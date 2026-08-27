@@ -13,10 +13,7 @@ from binance_square import (
 )
 
 
-SOURCE_AUTHOR = os.getenv(
-    "SOURCE_AUTHOR",
-    "TF_bnb"
-)
+SOURCE_AUTHOR = os.getenv("SOURCE_AUTHOR", "TF_bnb")
 
 PROFILE_URL = (
     "https://www.binance.com/en/square/profile/"
@@ -34,14 +31,12 @@ MEDIA_DIR = Path("tmp_media")
 def load_state():
 
     if not STATE_FILE.exists():
-
         return {
             "initialized": False,
             "processed_ids": []
         }
 
     try:
-
         return json.loads(
             STATE_FILE.read_text(
                 encoding="utf-8"
@@ -49,11 +44,7 @@ def load_state():
         )
 
     except Exception as e:
-
-        print(
-            "State file read error:",
-            repr(e)
-        )
+        print("State read error:", repr(e))
 
         return {
             "initialized": False,
@@ -70,10 +61,7 @@ def save_state(state):
 
     state["processed_ids"] = list(
         dict.fromkeys(
-            state.get(
-                "processed_ids",
-                []
-            )
+            state.get("processed_ids", [])
         )
     )[-500:]
 
@@ -88,7 +76,7 @@ def save_state(state):
 
 
 # ============================================================
-# IMAGE EXTRACTION
+# EXTRACT POSTS
 # ============================================================
 
 def extract_visible_posts(page, debug=False):
@@ -107,9 +95,7 @@ def extract_visible_posts(page, debug=False):
 
             link = links.nth(i)
 
-            href = link.get_attribute(
-                "href"
-            )
+            href = link.get_attribute("href")
 
             if not href:
                 continue
@@ -125,17 +111,13 @@ def extract_visible_posts(page, debug=False):
             if post_id in posts:
                 continue
 
-            # ------------------------------------------------
-            # FIND REAL BINANCE FEED CARD
-            # ------------------------------------------------
-
+            # Find Binance's actual feed card.
             container = link.locator(
                 "xpath=ancestor::div[contains(@class, 'feed-buzz-card-base-view')][1]"
             )
 
             if container.count() == 0:
 
-                # Fallback: walk upward through DOM
                 container = link
 
                 for _ in range(10):
@@ -164,7 +146,6 @@ def extract_visible_posts(page, debug=False):
                         container = parent
 
                     except Exception:
-
                         break
 
             # ------------------------------------------------
@@ -197,39 +178,17 @@ def extract_visible_posts(page, debug=False):
 
             try:
 
-                imgs = container.locator(
-                    "img"
-                )
+                imgs = container.locator("img")
 
                 img_count = imgs.count()
 
                 if debug:
 
                     print()
-                    print(
-                        "=" * 60
-                    )
-
-                    print(
-                        "IMAGE DEBUG"
-                    )
-
-                    print(
-                        "Post ID:",
-                        post_id
-                    )
-
-                    print(
-                        "REAL CONTAINER:",
-                        container.get_attribute(
-                            "class"
-                        )
-                    )
-
-                    print(
-                        "IMG ELEMENTS FOUND:",
-                        img_count
-                    )
+                    print("=" * 60)
+                    print("IMAGE DEBUG")
+                    print("Post ID:", post_id)
+                    print("IMG ELEMENTS FOUND:", img_count)
 
                 for j in range(
                     min(img_count, 10)
@@ -239,10 +198,7 @@ def extract_visible_posts(page, debug=False):
 
                     candidates = []
 
-                    # ----------------------------------------
-                    # STANDARD IMAGE ATTRIBUTES
-                    # ----------------------------------------
-
+                    # Normal image attributes.
                     for attr in [
                         "src",
                         "data-src",
@@ -259,19 +215,14 @@ def extract_visible_posts(page, debug=False):
                             )
 
                             if value:
-
                                 candidates.append(
                                     value
                                 )
 
                         except Exception:
-
                             pass
 
-                    # ----------------------------------------
-                    # SRCSET
-                    # ----------------------------------------
-
+                    # srcset.
                     try:
 
                         srcset = img.get_attribute(
@@ -292,99 +243,65 @@ def extract_visible_posts(page, debug=False):
                                 )[0]
 
                                 if url:
-
                                     candidates.append(
                                         url
                                     )
 
                     except Exception:
-
                         pass
-
-                    # ----------------------------------------
-                    # FILTER CANDIDATES
-                    # ----------------------------------------
 
                     for url in candidates:
 
                         if not url:
                             continue
 
-                        if url.startswith(
-                            "data:"
-                        ):
+                        if url.startswith("data:"):
                             continue
 
-                        # Ignore cookie UI
-                        if (
-                            "cookielaw.org"
-                            in url
-                        ):
+                        if "cookielaw.org" in url:
                             continue
 
                         if url not in images:
+                            images.append(url)
 
-                            images.append(
-                                url
-                            )
-
-                # ------------------------------------------------
-                # KEEP ACTUAL BINANCE PGC IMAGES
-                # ------------------------------------------------
-
+                # Prefer actual Square PGC images.
                 pgc_images = [
                     url
                     for url in images
-                    if (
-                        "public.bnbstatic.com/image/pgc/"
-                        in url
-                    )
+                    if "public.bnbstatic.com/image/pgc/"
+                    in url
                 ]
 
                 if pgc_images:
 
                     images = pgc_images
 
-                # ------------------------------------------------
-                # FALLBACK FOR OTHER BINANCE IMAGE HOSTS
-                # ------------------------------------------------
-
                 else:
 
-                    binance_images = [
+                    # Fallback for Binance CDN.
+                    images = [
                         url
                         for url in images
                         if (
-                            "bnbstatic.com"
-                            in url
-                            or "binance.com"
-                            in url
+                            "bnbstatic.com" in url
+                            or "binance.com" in url
                         )
                     ]
 
-                    images = binance_images
+                images = images[:4]
 
                 if debug:
 
-                    print(
-                        "FINAL IMAGE URLS FOUND:"
-                    )
+                    print("FINAL IMAGE URLS:")
 
-                    for image in images[:4]:
+                    for image in images:
+                        print("IMAGE:", image)
 
-                        print(
-                            "IMAGE:",
-                            image
-                        )
-
-                    print(
-                        "=" * 60
-                    )
+                    print("=" * 60)
 
             except Exception as e:
 
                 if debug:
-
                     print(
                         "Image extraction error:",
                         repr(e)
@@ -395,25 +312,16 @@ def extract_visible_posts(page, debug=False):
             # ------------------------------------------------
 
             if href.startswith("/"):
-
                 href = (
                     "https://www.binance.com"
                     + href
                 )
 
-            # ------------------------------------------------
-            # SAVE POST
-            # ------------------------------------------------
-
             posts[post_id] = {
-
                 "id": post_id,
-
                 "webLink": href,
-
                 "content": text.strip(),
-
-                "images": images[:4]
+                "images": images
             }
 
         except Exception as e:
@@ -423,38 +331,27 @@ def extract_visible_posts(page, debug=False):
                 repr(e)
             )
 
-            continue
-
     return posts
 
 
 # ============================================================
-# SCRAPE BINANCE SQUARE PROFILE
+# SCRAPE PROFILE
 # ============================================================
 
 def scrape_profile():
 
     print("=" * 60)
-
-    print(
-        "BINANCE SQUARE TF_BNB SCRAPER"
-    )
-
+    print("BINANCE SQUARE TF_BNB SCRAPER")
     print("=" * 60)
 
-    print(
-        "Profile:",
-        SOURCE_AUTHOR
-    )
+    print("Profile:", SOURCE_AUTHOR)
 
     posts = {}
 
     with sync_playwright() as p:
 
         browser = p.chromium.launch(
-
             headless=True,
-
             args=[
                 "--no-sandbox",
                 "--disable-dev-shm-usage"
@@ -462,12 +359,10 @@ def scrape_profile():
         )
 
         page = browser.new_page(
-
             viewport={
                 "width": 1280,
                 "height": 900
             },
-
             user_agent=(
                 "Mozilla/5.0 "
                 "(Windows NT 10.0; Win64; x64) "
@@ -478,16 +373,11 @@ def scrape_profile():
             )
         )
 
-        print(
-            "Opening profile..."
-        )
+        print("Opening profile...")
 
         page.goto(
-
             PROFILE_URL,
-
             wait_until="domcontentloaded",
-
             timeout=60000
         )
 
@@ -498,18 +388,13 @@ def scrape_profile():
             page.title()
         )
 
-        # ------------------------------------------------
-        # FIRST EXTRACTION WITH DEBUG
-        # ------------------------------------------------
-
+        # First extraction with debug.
         initial = extract_visible_posts(
             page,
             debug=True
         )
 
-        posts.update(
-            initial
-        )
+        posts.update(initial)
 
         print(
             "Initial extraction:",
@@ -517,10 +402,7 @@ def scrape_profile():
             "posts"
         )
 
-        # ------------------------------------------------
-        # SCROLL
-        # ------------------------------------------------
-
+        # Scroll and collect.
         for scroll in range(12):
 
             visible = extract_visible_posts(
@@ -529,9 +411,7 @@ def scrape_profile():
 
             before = len(posts)
 
-            posts.update(
-                visible
-            )
+            posts.update(visible)
 
             print(
                 f"Scroll {scroll + 1}/12 | "
@@ -546,10 +426,6 @@ def scrape_profile():
 
             time.sleep(2)
 
-            # ------------------------------------------------
-            # EXTRA WAIT IF NOTHING NEW
-            # ------------------------------------------------
-
             if len(posts) == before:
 
                 time.sleep(3)
@@ -558,31 +434,21 @@ def scrape_profile():
                     page
                 )
 
-                posts.update(
-                    visible
-                )
+                posts.update(visible)
 
         browser.close()
 
-    result = list(
-        posts.values()
-    )
+    result = list(posts.values())
 
     print()
-
     print(
         "TOTAL POSTS FOUND:",
         len(result)
     )
 
-    # ------------------------------------------------
-    # SHOW FIRST 10 POSTS
-    # ------------------------------------------------
-
     for post in result[:10]:
 
         print()
-
         print(
             "POST:",
             post["id"]
@@ -590,22 +456,14 @@ def scrape_profile():
 
         print(
             "IMAGES:",
-            len(
-                post.get(
-                    "images",
-                    []
-                )
-            )
+            len(post.get("images", []))
         )
 
-        if post.get("images"):
-
-            for image in post["images"]:
-
-                print(
-                    "IMAGE:",
-                    image
-                )
+        for image in post.get("images", []):
+            print(
+                "IMAGE:",
+                image
+            )
 
     return result
 
@@ -616,6 +474,8 @@ def scrape_profile():
 
 def process_post(post):
 
+    post_id = post["id"]
+
     text = post.get(
         "content",
         ""
@@ -625,7 +485,7 @@ def process_post(post):
 
         print(
             "Skipping empty post:",
-            post["id"]
+            post_id
         )
 
         return False
@@ -635,9 +495,9 @@ def process_post(post):
         []
     )
 
-    # ========================================================
+    # --------------------------------------------------------
     # TEXT ONLY
-    # ========================================================
+    # --------------------------------------------------------
 
     if not image_urls:
 
@@ -649,15 +509,28 @@ def process_post(post):
             "Publishing text-only post..."
         )
 
-        result = publish_text(
-            text
+        result = publish_text(text)
+
+        print(
+            "Text publish response:",
+            result
         )
+
+        if isinstance(result, dict):
+
+            code = result.get("code")
+
+            return code in (
+                "000000",
+                0,
+                None
+            )
 
         return bool(result)
 
-    # ========================================================
+    # --------------------------------------------------------
     # IMAGE POST
-    # ========================================================
+    # --------------------------------------------------------
 
     print(
         f"Found {len(image_urls)} image(s)."
@@ -670,10 +543,7 @@ def process_post(post):
 
     local_files = []
 
-    # ------------------------------------------------
-    # DOWNLOAD IMAGES
-    # ------------------------------------------------
-
+    # Download.
     for index, url in enumerate(
         image_urls[:4],
         start=1
@@ -681,15 +551,18 @@ def process_post(post):
 
         try:
 
+            print(
+                f"Downloading image {index}:",
+                url
+            )
+
             path = download_image(
                 url,
                 MEDIA_DIR,
                 index
             )
 
-            local_files.append(
-                path
-            )
+            local_files.append(path)
 
             print(
                 "Downloaded:",
@@ -703,10 +576,6 @@ def process_post(post):
                 repr(e)
             )
 
-    # ------------------------------------------------
-    # DON'T PUBLISH TEXT-ONLY IF IMAGE DOWNLOAD FAILED
-    # ------------------------------------------------
-
     if not local_files:
 
         print(
@@ -714,25 +583,25 @@ def process_post(post):
         )
 
         print(
-            "Post will NOT be published."
+            "NOT publishing text-only."
         )
 
         return False
 
-    # ------------------------------------------------
-    # UPLOAD IMAGES TO BINANCE
-    # ------------------------------------------------
-
+    # Upload to Binance.
     processed_urls = []
 
     for path in local_files:
 
         try:
 
-            uploaded_url = (
-                upload_one_image(
-                    path
-                )
+            print(
+                "Uploading:",
+                path
+            )
+
+            uploaded_url = upload_one_image(
+                path
             )
 
             if uploaded_url:
@@ -742,7 +611,7 @@ def process_post(post):
                 )
 
                 print(
-                    "Uploaded image URL:",
+                    "Uploaded URL:",
                     uploaded_url
                 )
 
@@ -753,26 +622,15 @@ def process_post(post):
                 repr(e)
             )
 
-    # ------------------------------------------------
-    # NO SUCCESSFUL UPLOADS
-    # ------------------------------------------------
-
     if not processed_urls:
 
         print(
             "No images successfully uploaded."
         )
 
-        print(
-            "Post will NOT be marked processed."
-        )
-
         return False
 
-    # ------------------------------------------------
-    # PUBLISH IMAGE POST
-    # ------------------------------------------------
-
+    # Publish.
     print(
         "Publishing image post..."
     )
@@ -783,41 +641,29 @@ def process_post(post):
     )
 
     print(
-        "Publish result:",
+        "Publish response:",
         result
     )
 
-    # ------------------------------------------------
-    # IMPORTANT:
-    # Don't blindly assume HTTP 200 means success.
-    # Check common Binance response codes.
-    # ------------------------------------------------
+    if isinstance(result, dict):
 
-    if not isinstance(
-        result,
-        dict
-    ):
+        code = result.get("code")
+
+        if code in (
+            "000000",
+            0,
+            None
+        ):
+            return True
+
+        print(
+            "Publish failed with code:",
+            code
+        )
 
         return False
 
-    code = result.get(
-        "code"
-    )
-
-    if code in (
-        "000000",
-        0,
-        None
-    ):
-
-        return True
-
-    print(
-        "Binance publish returned failure code:",
-        code
-    )
-
-    return False
+    return bool(result)
 
 
 # ============================================================
@@ -845,9 +691,9 @@ def main():
         )
     )
 
-    # ========================================================
+    # --------------------------------------------------------
     # FIRST RUN
-    # ========================================================
+    # --------------------------------------------------------
 
     if not state.get(
         "initialized",
@@ -855,9 +701,8 @@ def main():
     ):
 
         print()
-
         print(
-            "FIRST RUN:"
+            "FIRST RUN"
         )
 
         print(
@@ -870,46 +715,31 @@ def main():
                 post["id"]
             )
 
-        state[
-            "processed_ids"
-        ] = list(
+        state["processed_ids"] = list(
             processed
         )
 
-        state[
-            "initialized"
-        ] = True
+        state["initialized"] = True
 
-        save_state(
-            state
-        )
+        save_state(state)
 
         print(
             "Initialization complete."
         )
 
-        print(
-            "Existing posts will NOT be reposted."
-        )
-
         return
 
-    # ========================================================
+    # --------------------------------------------------------
     # FIND NEW POSTS
-    # ========================================================
+    # --------------------------------------------------------
 
     new_posts = [
-
         post
-
         for post in posts
-
-        if post["id"]
-        not in processed
+        if post["id"] not in processed
     ]
 
     print()
-
     print(
         "NEW POSTS:",
         len(new_posts)
@@ -919,23 +749,17 @@ def main():
 
         return
 
-    # ========================================================
-    # OLDEST FIRST
-    # ========================================================
-
+    # Oldest first.
     new_posts.reverse()
 
-    # ========================================================
-    # PROCESS NEW POSTS
-    # ========================================================
+    # --------------------------------------------------------
+    # PROCESS
+    # --------------------------------------------------------
 
     for post in new_posts:
 
         print()
-
-        print(
-            "=" * 50
-        )
+        print("=" * 50)
 
         print(
             "NEW POST:",
@@ -959,4 +783,53 @@ def main():
 
         try:
 
-            success = pro
+            success = process_post(post)
+
+            if success:
+
+                processed.add(
+                    post["id"]
+                )
+
+                state["processed_ids"] = list(
+                    processed
+                )
+
+                save_state(state)
+
+                print(
+                    "SUCCESS:",
+                    post["id"]
+                )
+
+            else:
+
+                print(
+                    "FAILED:",
+                    post["id"]
+                )
+
+                print(
+                    "NOT marked as processed."
+                )
+
+        except Exception as e:
+
+            print(
+                "POST FAILED:",
+                repr(e)
+            )
+
+            print(
+                "Will retry on next run."
+            )
+
+    save_state(state)
+
+
+# ============================================================
+# ENTRY POINT
+# ============================================================
+
+if __name__ == "__main__":
+    main()
