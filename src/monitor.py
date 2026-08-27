@@ -5,6 +5,13 @@ from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
+from binance_square import (
+    download_image,
+    upload_one_image,
+    publish_text,
+    publish_images,
+)
+
 
 SOURCE_AUTHOR = os.getenv(
     "SOURCE_AUTHOR",
@@ -16,13 +23,77 @@ PROFILE_URL = (
     + SOURCE_AUTHOR
 )
 
+STATE_FILE = Path("src/state.json")
+MEDIA_DIR = Path("tmp_media")
 
-def inspect_posts(page):
 
-    print()
-    print("=" * 80)
-    print("BINANCE DOM IMAGE INVESTIGATION")
-    print("=" * 80)
+# ============================================================
+# STATE
+# ============================================================
+
+def load_state():
+
+    if not STATE_FILE.exists():
+
+        return {
+            "initialized": False,
+            "processed_ids": []
+        }
+
+    try:
+
+        return json.loads(
+            STATE_FILE.read_text(
+                encoding="utf-8"
+            )
+        )
+
+    except Exception as e:
+
+        print(
+            "State file read error:",
+            repr(e)
+        )
+
+        return {
+            "initialized": False,
+            "processed_ids": []
+        }
+
+
+def save_state(state):
+
+    STATE_FILE.parent.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    state["processed_ids"] = list(
+        dict.fromkeys(
+            state.get(
+                "processed_ids",
+                []
+            )
+        )
+    )[-500:]
+
+    STATE_FILE.write_text(
+        json.dumps(
+            state,
+            indent=2,
+            ensure_ascii=False
+        ),
+        encoding="utf-8"
+    )
+
+
+# ============================================================
+# IMAGE EXTRACTION
+# ============================================================
+
+def extract_visible_posts(page, debug=False):
+
+    posts = {}
 
     links = page.locator(
         'a[href*="/square/post/"]'
@@ -30,17 +101,7 @@ def inspect_posts(page):
 
     count = links.count()
 
-    print(
-        "POST LINKS FOUND:",
-        count
-    )
-
-    if count == 0:
-        print("No post links found.")
-        return
-
-    # Inspect first few posts instead of only one.
-    for i in range(min(count, 3)):
+    for i in range(count):
 
         try:
 
@@ -50,208 +111,335 @@ def inspect_posts(page):
                 "href"
             )
 
-            print()
-            print("-" * 80)
-            print(
-                f"POST LINK #{i + 1}:",
-                href
+            if not href:
+                continue
+
+            post_id = (
+                href.rstrip("/")
+                .split("/")[-1]
             )
-            print("-" * 80)
+
+            if not post_id.isdigit():
+                continue
+
+            if post_id in posts:
+                continue
 
             # ------------------------------------------------
-            # WALK UP THE DOM
+            # FIND REAL BINANCE FEED CARD
             # ------------------------------------------------
 
-            current = link
+            container = link.locator(
+                "xpath=ancestor::div[contains(@class, 'feed-buzz-card-base-view')][1]"
+            )
 
-            for level in range(1, 8):
+            if container.count() == 0:
 
-                try:
+                # Fallback: walk upward through DOM
+                container = link
 
-                    current = current.locator(
-                        "xpath=.."
-                    )
-
-                    tag = current.evaluate(
-                        "(el) => el.tagName"
-                    )
-
-                    class_name = current.get_attribute(
-                        "class"
-                    )
-
-                    html = current.evaluate(
-                        "(el) => el.outerHTML"
-                    )
-
-                    print()
-                    print(
-                        f"DOM LEVEL {level}: "
-                        f"<{tag}>"
-                    )
-
-                    print(
-                        "CLASS:",
-                        class_name
-                    )
-
-                    print(
-                        "HTML LENGTH:",
-                        len(html or "")
-                    )
-
-                    # ------------------------------------------------
-                    # IMAGE-RELATED ELEMENTS
-                    # ------------------------------------------------
+                for _ in range(10):
 
                     try:
 
-                        image_count = current.locator(
-                            "img"
-                        ).count()
-
-                        picture_count = current.locator(
-                            "picture"
-                        ).count()
-
-                        source_count = current.locator(
-                            "source"
-                        ).count()
-
-                        video_count = current.locator(
-                            "video"
-                        ).count()
-
-                        print(
-                            "IMG:",
-                            image_count,
-                            "| PICTURE:",
-                            picture_count,
-                            "| SOURCE:",
-                            source_count,
-                            "| VIDEO:",
-                            video_count
+                        parent = container.locator(
+                            "xpath=.."
                         )
+
+                        parent_class = (
+                            parent.get_attribute(
+                                "class"
+                            )
+                            or ""
+                        )
+
+                        if (
+                            "feed-buzz-card-base-view"
+                            in parent_class
+                        ):
+
+                            container = parent
+                            break
+
+                        container = parent
 
                     except Exception:
-                        pass
-
-                    # Stop when we reach a reasonably large container.
-                    if len(html or "") > 50000:
-
-                        print(
-                            "Large container reached."
-                        )
-
-                        # Save HTML to artifact file.
-                        Path(
-                            "debug_post.html"
-                        ).write_text(
-                            html,
-                            encoding="utf-8"
-                        )
-
-                        print(
-                            "Saved:",
-                            "debug_post.html"
-                        )
 
                         break
 
-                except Exception as e:
+            # ------------------------------------------------
+            # TEXT
+            # ------------------------------------------------
+
+            try:
+
+                text = container.inner_text(
+                    timeout=3000
+                )
+
+            except Exception:
+
+                try:
+
+                    text = link.inner_text(
+                        timeout=3000
+                    )
+
+                except Exception:
+
+                    text = ""
+
+            # ------------------------------------------------
+            # IMAGES
+            # ------------------------------------------------
+
+            images = []
+
+            try:
+
+                imgs = container.locator(
+                    "img"
+                )
+
+                img_count = imgs.count()
+
+                if debug:
+
+                    print()
+                    print(
+                        "=" * 60
+                    )
 
                     print(
-                        "DOM inspection error:",
+                        "IMAGE DEBUG"
+                    )
+
+                    print(
+                        "Post ID:",
+                        post_id
+                    )
+
+                    print(
+                        "REAL CONTAINER:",
+                        container.get_attribute(
+                            "class"
+                        )
+                    )
+
+                    print(
+                        "IMG ELEMENTS FOUND:",
+                        img_count
+                    )
+
+                for j in range(
+                    min(img_count, 10)
+                ):
+
+                    img = imgs.nth(j)
+
+                    candidates = []
+
+                    # ----------------------------------------
+                    # STANDARD IMAGE ATTRIBUTES
+                    # ----------------------------------------
+
+                    for attr in [
+                        "src",
+                        "data-src",
+                        "data-original",
+                        "data-lazy-src",
+                        "data-url",
+                        "data-image"
+                    ]:
+
+                        try:
+
+                            value = img.get_attribute(
+                                attr
+                            )
+
+                            if value:
+
+                                candidates.append(
+                                    value
+                                )
+
+                        except Exception:
+
+                            pass
+
+                    # ----------------------------------------
+                    # SRCSET
+                    # ----------------------------------------
+
+                    try:
+
+                        srcset = img.get_attribute(
+                            "srcset"
+                        )
+
+                        if srcset:
+
+                            for item in srcset.split(","):
+
+                                item = item.strip()
+
+                                if not item:
+                                    continue
+
+                                url = item.split(
+                                    " "
+                                )[0]
+
+                                if url:
+
+                                    candidates.append(
+                                        url
+                                    )
+
+                    except Exception:
+
+                        pass
+
+                    # ----------------------------------------
+                    # FILTER CANDIDATES
+                    # ----------------------------------------
+
+                    for url in candidates:
+
+                        if not url:
+                            continue
+
+                        if url.startswith(
+                            "data:"
+                        ):
+                            continue
+
+                        # Ignore cookie UI
+                        if (
+                            "cookielaw.org"
+                            in url
+                        ):
+                            continue
+
+                        if url not in images:
+
+                            images.append(
+                                url
+                            )
+
+                # ------------------------------------------------
+                # KEEP ACTUAL BINANCE PGC IMAGES
+                # ------------------------------------------------
+
+                pgc_images = [
+                    url
+                    for url in images
+                    if (
+                        "public.bnbstatic.com/image/pgc/"
+                        in url
+                    )
+                ]
+
+                if pgc_images:
+
+                    images = pgc_images
+
+                # ------------------------------------------------
+                # FALLBACK FOR OTHER BINANCE IMAGE HOSTS
+                # ------------------------------------------------
+
+                else:
+
+                    binance_images = [
+                        url
+                        for url in images
+                        if (
+                            "bnbstatic.com"
+                            in url
+                            or "binance.com"
+                            in url
+                        )
+                    ]
+
+                    images = binance_images
+
+                if debug:
+
+                    print(
+                        "FINAL IMAGE URLS FOUND:"
+                    )
+
+                    for image in images[:4]:
+
+                        print(
+                            "IMAGE:",
+                            image
+                        )
+
+                    print(
+                        "=" * 60
+                    )
+
+            except Exception as e:
+
+                if debug:
+
+                    print(
+                        "Image extraction error:",
                         repr(e)
                     )
 
-                    break
-
             # ------------------------------------------------
-            # SEARCH THE ENTIRE PAGE FOR IMAGE-LIKE URLs
+            # NORMALIZE LINK
             # ------------------------------------------------
 
-            print()
-            print(
-                "SEARCHING PAGE HTML FOR IMAGE URLS..."
-            )
+            if href.startswith("/"):
 
-            page_html = page.content()
-
-            # Print URLs containing common image extensions.
-            import re
-
-            matches = re.findall(
-                r'https?://[^"\']+\.(?:jpg|jpeg|png|webp|gif)(?:\?[^"\']*)?',
-                page_html,
-                flags=re.IGNORECASE
-            )
-
-            unique_matches = []
-
-            for match in matches:
-
-                if match not in unique_matches:
-                    unique_matches.append(match)
-
-            print(
-                "IMAGE-LIKE URLS FOUND:",
-                len(unique_matches)
-            )
-
-            for url in unique_matches[:20]:
-
-                print(
-                    "IMAGE:",
-                    url[:500]
+                href = (
+                    "https://www.binance.com"
+                    + href
                 )
 
             # ------------------------------------------------
-            # SEARCH FOR BINANCE CDN URLS
+            # SAVE POST
             # ------------------------------------------------
 
-            print()
-            print(
-                "SEARCHING FOR BINANCE CDN REFERENCES..."
-            )
+            posts[post_id] = {
 
-            cdn_matches = re.findall(
-                r'https?://[^"\']*binance[^"\']*',
-                page_html,
-                flags=re.IGNORECASE
-            )
+                "id": post_id,
 
-            unique_cdn = []
+                "webLink": href,
 
-            for url in cdn_matches:
+                "content": text.strip(),
 
-                if url not in unique_cdn:
-                    unique_cdn.append(url)
-
-            print(
-                "BINANCE URL REFERENCES:",
-                len(unique_cdn)
-            )
-
-            for url in unique_cdn[:30]:
-
-                print(
-                    "BINANCE:",
-                    url[:500]
-                )
+                "images": images[:4]
+            }
 
         except Exception as e:
 
             print(
-                "POST INSPECTION ERROR:",
+                "Post extraction error:",
                 repr(e)
             )
 
+            continue
 
-def main():
+    return posts
+
+
+# ============================================================
+# SCRAPE BINANCE SQUARE PROFILE
+# ============================================================
+
+def scrape_profile():
 
     print("=" * 60)
-    print("BINANCE SQUARE DOM DEBUGGER")
+
+    print(
+        "BINANCE SQUARE TF_BNB SCRAPER"
+    )
+
     print("=" * 60)
 
     print(
@@ -259,10 +447,14 @@ def main():
         SOURCE_AUTHOR
     )
 
+    posts = {}
+
     with sync_playwright() as p:
 
         browser = p.chromium.launch(
+
             headless=True,
+
             args=[
                 "--no-sandbox",
                 "--disable-dev-shm-usage"
@@ -270,10 +462,12 @@ def main():
         )
 
         page = browser.new_page(
+
             viewport={
                 "width": 1280,
                 "height": 900
             },
+
             user_agent=(
                 "Mozilla/5.0 "
                 "(Windows NT 10.0; Win64; x64) "
@@ -289,63 +483,480 @@ def main():
         )
 
         page.goto(
+
             PROFILE_URL,
+
             wait_until="domcontentloaded",
+
             timeout=60000
         )
 
-        time.sleep(8)
+        time.sleep(7)
 
         print(
             "Page:",
             page.title()
         )
 
-        inspect_posts(page)
+        # ------------------------------------------------
+        # FIRST EXTRACTION WITH DEBUG
+        # ------------------------------------------------
+
+        initial = extract_visible_posts(
+            page,
+            debug=True
+        )
+
+        posts.update(
+            initial
+        )
+
+        print(
+            "Initial extraction:",
+            len(posts),
+            "posts"
+        )
 
         # ------------------------------------------------
-        # SAVE FULL PAGE HTML
+        # SCROLL
         # ------------------------------------------------
+
+        for scroll in range(12):
+
+            visible = extract_visible_posts(
+                page
+            )
+
+            before = len(posts)
+
+            posts.update(
+                visible
+            )
+
+            print(
+                f"Scroll {scroll + 1}/12 | "
+                f"visible={len(visible)} | "
+                f"total={len(posts)}"
+            )
+
+            page.mouse.wheel(
+                0,
+                2500
+            )
+
+            time.sleep(2)
+
+            # ------------------------------------------------
+            # EXTRA WAIT IF NOTHING NEW
+            # ------------------------------------------------
+
+            if len(posts) == before:
+
+                time.sleep(3)
+
+                visible = extract_visible_posts(
+                    page
+                )
+
+                posts.update(
+                    visible
+                )
+
+        browser.close()
+
+    result = list(
+        posts.values()
+    )
+
+    print()
+
+    print(
+        "TOTAL POSTS FOUND:",
+        len(result)
+    )
+
+    # ------------------------------------------------
+    # SHOW FIRST 10 POSTS
+    # ------------------------------------------------
+
+    for post in result[:10]:
+
+        print()
+
+        print(
+            "POST:",
+            post["id"]
+        )
+
+        print(
+            "IMAGES:",
+            len(
+                post.get(
+                    "images",
+                    []
+                )
+            )
+        )
+
+        if post.get("images"):
+
+            for image in post["images"]:
+
+                print(
+                    "IMAGE:",
+                    image
+                )
+
+    return result
+
+
+# ============================================================
+# PROCESS ONE POST
+# ============================================================
+
+def process_post(post):
+
+    text = post.get(
+        "content",
+        ""
+    ).strip()
+
+    if not text:
+
+        print(
+            "Skipping empty post:",
+            post["id"]
+        )
+
+        return False
+
+    image_urls = post.get(
+        "images",
+        []
+    )
+
+    # ========================================================
+    # TEXT ONLY
+    # ========================================================
+
+    if not image_urls:
+
+        print(
+            "No images found."
+        )
+
+        print(
+            "Publishing text-only post..."
+        )
+
+        result = publish_text(
+            text
+        )
+
+        return bool(result)
+
+    # ========================================================
+    # IMAGE POST
+    # ========================================================
+
+    print(
+        f"Found {len(image_urls)} image(s)."
+    )
+
+    MEDIA_DIR.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    local_files = []
+
+    # ------------------------------------------------
+    # DOWNLOAD IMAGES
+    # ------------------------------------------------
+
+    for index, url in enumerate(
+        image_urls[:4],
+        start=1
+    ):
 
         try:
 
-            html = page.content()
-
-            Path(
-                "debug_page.html"
-            ).write_text(
-                html,
-                encoding="utf-8"
+            path = download_image(
+                url,
+                MEDIA_DIR,
+                index
             )
 
-            print()
-            print(
-                "Full page HTML saved:"
+            local_files.append(
+                path
             )
 
             print(
-                "debug_page.html"
-            )
-
-            print(
-                "HTML size:",
-                len(html)
+                "Downloaded:",
+                path
             )
 
         except Exception as e:
 
             print(
-                "Could not save page HTML:",
+                "Image download failed:",
                 repr(e)
             )
 
-        browser.close()
+    # ------------------------------------------------
+    # DON'T PUBLISH TEXT-ONLY IF IMAGE DOWNLOAD FAILED
+    # ------------------------------------------------
+
+    if not local_files:
+
+        print(
+            "All image downloads failed."
+        )
+
+        print(
+            "Post will NOT be published."
+        )
+
+        return False
+
+    # ------------------------------------------------
+    # UPLOAD IMAGES TO BINANCE
+    # ------------------------------------------------
+
+    processed_urls = []
+
+    for path in local_files:
+
+        try:
+
+            uploaded_url = (
+                upload_one_image(
+                    path
+                )
+            )
+
+            if uploaded_url:
+
+                processed_urls.append(
+                    uploaded_url
+                )
+
+                print(
+                    "Uploaded image URL:",
+                    uploaded_url
+                )
+
+        except Exception as e:
+
+            print(
+                "Binance image upload failed:",
+                repr(e)
+            )
+
+    # ------------------------------------------------
+    # NO SUCCESSFUL UPLOADS
+    # ------------------------------------------------
+
+    if not processed_urls:
+
+        print(
+            "No images successfully uploaded."
+        )
+
+        print(
+            "Post will NOT be marked processed."
+        )
+
+        return False
+
+    # ------------------------------------------------
+    # PUBLISH IMAGE POST
+    # ------------------------------------------------
+
+    print(
+        "Publishing image post..."
+    )
+
+    result = publish_images(
+        text,
+        processed_urls
+    )
+
+    print(
+        "Publish result:",
+        result
+    )
+
+    # ------------------------------------------------
+    # IMPORTANT:
+    # Don't blindly assume HTTP 200 means success.
+    # Check common Binance response codes.
+    # ------------------------------------------------
+
+    if not isinstance(
+        result,
+        dict
+    ):
+
+        return False
+
+    code = result.get(
+        "code"
+    )
+
+    if code in (
+        "000000",
+        0,
+        None
+    ):
+
+        return True
+
+    print(
+        "Binance publish returned failure code:",
+        code
+    )
+
+    return False
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
+
+    state = load_state()
+
+    posts = scrape_profile()
+
+    if not posts:
+
+        print(
+            "No posts found."
+        )
+
+        return
+
+    processed = set(
+        state.get(
+            "processed_ids",
+            []
+        )
+    )
+
+    # ========================================================
+    # FIRST RUN
+    # ========================================================
+
+    if not state.get(
+        "initialized",
+        False
+    ):
+
+        print()
+
+        print(
+            "FIRST RUN:"
+        )
+
+        print(
+            "Marking existing posts as processed."
+        )
+
+        for post in posts:
+
+            processed.add(
+                post["id"]
+            )
+
+        state[
+            "processed_ids"
+        ] = list(
+            processed
+        )
+
+        state[
+            "initialized"
+        ] = True
+
+        save_state(
+            state
+        )
+
+        print(
+            "Initialization complete."
+        )
+
+        print(
+            "Existing posts will NOT be reposted."
+        )
+
+        return
+
+    # ========================================================
+    # FIND NEW POSTS
+    # ========================================================
+
+    new_posts = [
+
+        post
+
+        for post in posts
+
+        if post["id"]
+        not in processed
+    ]
 
     print()
-    print("=" * 80)
-    print("DEBUG COMPLETE")
-    print("=" * 80)
 
+    print(
+        "NEW POSTS:",
+        len(new_posts)
+    )
 
-if __name__ == "__main__":
-    main()
+    if not new_posts:
+
+        return
+
+    # ========================================================
+    # OLDEST FIRST
+    # ========================================================
+
+    new_posts.reverse()
+
+    # ========================================================
+    # PROCESS NEW POSTS
+    # ========================================================
+
+    for post in new_posts:
+
+        print()
+
+        print(
+            "=" * 50
+        )
+
+        print(
+            "NEW POST:",
+            post["id"]
+        )
+
+        print(
+            "SOURCE:",
+            post["webLink"]
+        )
+
+        print(
+            "IMAGES:",
+            len(
+                post.get(
+                    "images",
+                    []
+                )
+            )
+        )
+
+        try:
+
+            success = pro
