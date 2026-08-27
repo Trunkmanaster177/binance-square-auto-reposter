@@ -5,67 +5,24 @@ from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
-from binance_square import (
-    download_image,
-    upload_one_image,
-    publish_text,
-    publish_images,
+
+SOURCE_AUTHOR = os.getenv(
+    "SOURCE_AUTHOR",
+    "TF_bnb"
 )
-
-
-SOURCE_AUTHOR = os.getenv("SOURCE_AUTHOR", "TF_bnb")
 
 PROFILE_URL = (
     "https://www.binance.com/en/square/profile/"
     + SOURCE_AUTHOR
 )
 
-STATE_FILE = Path("src/state.json")
-MEDIA_DIR = Path("tmp_media")
 
+def inspect_posts(page):
 
-def load_state():
-    if not STATE_FILE.exists():
-        return {
-            "initialized": False,
-            "processed_ids": []
-        }
-
-    try:
-        return json.loads(
-            STATE_FILE.read_text(encoding="utf-8")
-        )
-    except Exception:
-        return {
-            "initialized": False,
-            "processed_ids": []
-        }
-
-
-def save_state(state):
-    STATE_FILE.parent.mkdir(
-        parents=True,
-        exist_ok=True
-    )
-
-    state["processed_ids"] = list(
-        dict.fromkeys(
-            state.get("processed_ids", [])
-        )
-    )[-500:]
-
-    STATE_FILE.write_text(
-        json.dumps(
-            state,
-            indent=2,
-            ensure_ascii=False
-        ),
-        encoding="utf-8"
-    )
-
-
-def extract_visible_posts(page, debug=False):
-    posts = {}
+    print()
+    print("=" * 80)
+    print("BINANCE DOM IMAGE INVESTIGATION")
+    print("=" * 80)
 
     links = page.locator(
         'a[href*="/square/post/"]'
@@ -73,274 +30,234 @@ def extract_visible_posts(page, debug=False):
 
     count = links.count()
 
-    for i in range(count):
+    print(
+        "POST LINKS FOUND:",
+        count
+    )
+
+    if count == 0:
+        print("No post links found.")
+        return
+
+    # Inspect first few posts instead of only one.
+    for i in range(min(count, 3)):
 
         try:
+
             link = links.nth(i)
 
-            href = link.get_attribute("href")
-
-            if not href:
-                continue
-
-            post_id = (
-                href.rstrip("/")
-                .split("/")[-1]
+            href = link.get_attribute(
+                "href"
             )
 
-            if not post_id.isdigit():
-                continue
-
-            if post_id in posts:
-                continue
-
-            # Find nearest article first.
-            container = link.locator(
-                "xpath=ancestor::article[1]"
+            print()
+            print("-" * 80)
+            print(
+                f"POST LINK #{i + 1}:",
+                href
             )
-
-            if container.count() == 0:
-                container = link.locator(
-                    "xpath=ancestor::div[1]"
-                )
-
-            try:
-                text = container.inner_text(
-                    timeout=2000
-                )
-            except Exception:
-                text = link.inner_text(
-                    timeout=2000
-                )
-
-            images = []
+            print("-" * 80)
 
             # ------------------------------------------------
-            # DEBUG IMAGE INSPECTION
+            # WALK UP THE DOM
             # ------------------------------------------------
 
-            try:
-                imgs = container.locator("img")
-                img_count = imgs.count()
+            current = link
 
-                if debug and i == 0:
-                    print()
-                    print("=" * 70)
-                    print("IMAGE DEBUG")
-                    print("=" * 70)
-                    print("Post ID:", post_id)
-                    print("IMG ELEMENTS FOUND:", img_count)
+            for level in range(1, 8):
 
-                for j in range(min(img_count, 10)):
+                try:
 
-                    img = imgs.nth(j)
-
-                    attributes = {}
-
-                    for attr in [
-                        "src",
-                        "srcset",
-                        "data-src",
-                        "data-original",
-                        "data-lazy-src",
-                        "data-url",
-                        "data-image",
-                        "alt"
-                    ]:
-                        try:
-                            value = img.get_attribute(attr)
-
-                            if value:
-                                attributes[attr] = value
-                        except Exception:
-                            pass
-
-                    if debug and i == 0:
-                        print()
-                        print(f"IMG #{j + 1}")
-                        print("ATTRIBUTES:")
-                        print(json.dumps(
-                            attributes,
-                            indent=2,
-                            ensure_ascii=False
-                        ))
-
-                    # Try normal src.
-                    src = attributes.get("src")
-
-                    if src and not src.startswith("data:"):
-                        if src not in images:
-                            images.append(src)
-
-                    # Try lazy-loading attributes.
-                    for attr in [
-                        "data-src",
-                        "data-original",
-                        "data-lazy-src",
-                        "data-url",
-                        "data-image"
-                    ]:
-                        value = attributes.get(attr)
-
-                        if value and not value.startswith("data:"):
-                            if value not in images:
-                                images.append(value)
-
-                    # Try srcset.
-                    srcset = attributes.get("srcset")
-
-                    if srcset:
-                        candidates = []
-
-                        for item in srcset.split(","):
-                            item = item.strip()
-
-                            if not item:
-                                continue
-
-                            url = item.split(" ")[0]
-
-                            if (
-                                url
-                                and not url.startswith("data:")
-                            ):
-                                candidates.append(url)
-
-                        # Pick the last/largest candidate.
-                        if candidates:
-                            selected = candidates[-1]
-
-                            if selected not in images:
-                                images.append(selected)
-
-            except Exception as e:
-
-                if debug and i == 0:
-                    print(
-                        "IMAGE EXTRACTION ERROR:",
-                        repr(e)
+                    current = current.locator(
+                        "xpath=.."
                     )
 
-            # ------------------------------------------------
-            # CHECK CSS BACKGROUND IMAGES
-            # ------------------------------------------------
+                    tag = current.evaluate(
+                        "(el) => el.tagName"
+                    )
 
-            try:
+                    class_name = current.get_attribute(
+                        "class"
+                    )
 
-                elements = container.locator(
-                    "[style*='background-image']"
-                )
+                    html = current.evaluate(
+                        "(el) => el.outerHTML"
+                    )
 
-                element_count = elements.count()
-
-                if debug and i == 0:
                     print()
                     print(
-                        "BACKGROUND IMAGE ELEMENTS:",
-                        element_count
+                        f"DOM LEVEL {level}: "
+                        f"<{tag}>"
                     )
 
-                for j in range(
-                    min(element_count, 10)
-                ):
-
-                    element = elements.nth(j)
-
-                    style = element.get_attribute(
-                        "style"
+                    print(
+                        "CLASS:",
+                        class_name
                     )
 
-                    if debug and i == 0:
+                    print(
+                        "HTML LENGTH:",
+                        len(html or "")
+                    )
+
+                    # ------------------------------------------------
+                    # IMAGE-RELATED ELEMENTS
+                    # ------------------------------------------------
+
+                    try:
+
+                        image_count = current.locator(
+                            "img"
+                        ).count()
+
+                        picture_count = current.locator(
+                            "picture"
+                        ).count()
+
+                        source_count = current.locator(
+                            "source"
+                        ).count()
+
+                        video_count = current.locator(
+                            "video"
+                        ).count()
+
                         print(
-                            "BACKGROUND STYLE:",
-                            style
+                            "IMG:",
+                            image_count,
+                            "| PICTURE:",
+                            picture_count,
+                            "| SOURCE:",
+                            source_count,
+                            "| VIDEO:",
+                            video_count
                         )
 
-                    if style and "url(" in style:
+                    except Exception:
+                        pass
 
-                        start = style.find(
-                            "url("
-                        ) + 4
+                    # Stop when we reach a reasonably large container.
+                    if len(html or "") > 50000:
 
-                        end = style.find(
-                            ")",
-                            start
+                        print(
+                            "Large container reached."
                         )
 
-                        if end > start:
+                        # Save HTML to artifact file.
+                        Path(
+                            "debug_post.html"
+                        ).write_text(
+                            html,
+                            encoding="utf-8"
+                        )
 
-                            url = style[
-                                start:end
-                            ].strip(
-                                "\"'"
-                            )
+                        print(
+                            "Saved:",
+                            "debug_post.html"
+                        )
 
-                            if (
-                                url
-                                and not url.startswith(
-                                    "data:"
-                                )
-                                and url not in images
-                            ):
-                                images.append(url)
+                        break
 
-            except Exception as e:
+                except Exception as e:
 
-                if debug and i == 0:
                     print(
-                        "BACKGROUND IMAGE ERROR:",
+                        "DOM inspection error:",
                         repr(e)
                     )
 
-            if debug and i == 0:
-                print()
+                    break
+
+            # ------------------------------------------------
+            # SEARCH THE ENTIRE PAGE FOR IMAGE-LIKE URLs
+            # ------------------------------------------------
+
+            print()
+            print(
+                "SEARCHING PAGE HTML FOR IMAGE URLS..."
+            )
+
+            page_html = page.content()
+
+            # Print URLs containing common image extensions.
+            import re
+
+            matches = re.findall(
+                r'https?://[^"\']+\.(?:jpg|jpeg|png|webp|gif)(?:\?[^"\']*)?',
+                page_html,
+                flags=re.IGNORECASE
+            )
+
+            unique_matches = []
+
+            for match in matches:
+
+                if match not in unique_matches:
+                    unique_matches.append(match)
+
+            print(
+                "IMAGE-LIKE URLS FOUND:",
+                len(unique_matches)
+            )
+
+            for url in unique_matches[:20]:
+
                 print(
-                    "FINAL IMAGE URLS FOUND:"
+                    "IMAGE:",
+                    url[:500]
                 )
 
-                for image in images:
-                    print(image)
+            # ------------------------------------------------
+            # SEARCH FOR BINANCE CDN URLS
+            # ------------------------------------------------
 
-                print("=" * 70)
-                print()
+            print()
+            print(
+                "SEARCHING FOR BINANCE CDN REFERENCES..."
+            )
 
-            if href.startswith("/"):
-                href = (
-                    "https://www.binance.com"
-                    + href
+            cdn_matches = re.findall(
+                r'https?://[^"\']*binance[^"\']*',
+                page_html,
+                flags=re.IGNORECASE
+            )
+
+            unique_cdn = []
+
+            for url in cdn_matches:
+
+                if url not in unique_cdn:
+                    unique_cdn.append(url)
+
+            print(
+                "BINANCE URL REFERENCES:",
+                len(unique_cdn)
+            )
+
+            for url in unique_cdn[:30]:
+
+                print(
+                    "BINANCE:",
+                    url[:500]
                 )
-
-            posts[post_id] = {
-                "id": post_id,
-                "webLink": href,
-                "content": text.strip(),
-                "images": images[:4]
-            }
 
         except Exception as e:
 
             print(
-                "Post extraction error:",
+                "POST INSPECTION ERROR:",
                 repr(e)
             )
 
-            continue
 
-    return posts
-
-
-def scrape_profile():
+def main():
 
     print("=" * 60)
-    print("BINANCE SQUARE TF_BNB SCRAPER")
+    print("BINANCE SQUARE DOM DEBUGGER")
     print("=" * 60)
 
     print(
         "Profile:",
         SOURCE_AUTHOR
     )
-
-    posts = {}
 
     with sync_playwright() as p:
 
@@ -377,352 +294,57 @@ def scrape_profile():
             timeout=60000
         )
 
-        time.sleep(7)
+        time.sleep(8)
 
         print(
             "Page:",
             page.title()
         )
 
-        # ----------------------------------------------------
-        # FIRST EXTRACTION WITH DEBUG ENABLED
-        # ----------------------------------------------------
+        inspect_posts(page)
 
-        visible = extract_visible_posts(
-            page,
-            debug=True
-        )
+        # ------------------------------------------------
+        # SAVE FULL PAGE HTML
+        # ------------------------------------------------
 
-        posts.update(visible)
+        try:
 
-        print(
-            f"Initial extraction: "
-            f"{len(posts)} posts"
-        )
+            html = page.content()
 
-        # ----------------------------------------------------
-        # SCROLLING
-        # ----------------------------------------------------
-
-        for scroll in range(12):
-
-            page.mouse.wheel(
-                0,
-                2500
+            Path(
+                "debug_page.html"
+            ).write_text(
+                html,
+                encoding="utf-8"
             )
 
-            time.sleep(2)
-
-            visible = extract_visible_posts(
-                page,
-                debug=False
+            print()
+            print(
+                "Full page HTML saved:"
             )
-
-            before = len(posts)
-
-            posts.update(visible)
 
             print(
-                f"Scroll {scroll + 1}/12 | "
-                f"visible={len(visible)} | "
-                f"total={len(posts)}"
+                "debug_page.html"
             )
 
-            if len(posts) == before:
+            print(
+                "HTML size:",
+                len(html)
+            )
 
-                time.sleep(3)
+        except Exception as e:
 
-                visible = extract_visible_posts(
-                    page,
-                    debug=False
-                )
-
-                posts.update(visible)
+            print(
+                "Could not save page HTML:",
+                repr(e)
+            )
 
         browser.close()
 
-    result = list(posts.values())
-
     print()
-    print(
-        "TOTAL POSTS FOUND:",
-        len(result)
-    )
-
-    for post in result[:10]:
-
-        print()
-        print(
-            "POST:",
-            post["id"]
-        )
-
-        print(
-            "IMAGES:",
-            len(post["images"])
-        )
-
-        if post["images"]:
-            for image in post["images"]:
-                print(
-                    "IMAGE URL:",
-                    image
-                )
-
-    return result
-
-
-def process_post(post):
-
-    text = post["content"].strip()
-
-    if not text:
-        print(
-            "Skipping empty post:",
-            post["id"]
-        )
-
-        return False
-
-    image_urls = post.get(
-        "images",
-        []
-    )
-
-    # --------------------------------------------------------
-    # TEXT ONLY
-    # --------------------------------------------------------
-
-    if not image_urls:
-
-        print(
-            "Publishing text-only post..."
-        )
-
-        result = publish_text(text)
-
-        return bool(result)
-
-    # --------------------------------------------------------
-    # IMAGE POST
-    # --------------------------------------------------------
-
-    print(
-        f"Found {len(image_urls)} image(s)."
-    )
-
-    MEDIA_DIR.mkdir(
-        parents=True,
-        exist_ok=True
-    )
-
-    local_files = []
-
-    for index, url in enumerate(
-        image_urls[:4],
-        start=1
-    ):
-
-        try:
-
-            path = download_image(
-                url,
-                MEDIA_DIR,
-                index
-            )
-
-            local_files.append(path)
-
-        except Exception as e:
-
-            print(
-                "Image download failed:",
-                repr(e)
-            )
-
-    if not local_files:
-
-        print(
-            "All image downloads failed."
-        )
-
-        return False
-
-    processed_urls = []
-
-    for path in local_files:
-
-        try:
-
-            uploaded_url = upload_one_image(
-                path
-            )
-
-            processed_urls.append(
-                uploaded_url
-            )
-
-        except Exception as e:
-
-            print(
-                "Binance image upload failed:",
-                repr(e)
-            )
-
-    if not processed_urls:
-
-        print(
-            "No images successfully uploaded."
-        )
-
-        return False
-
-    result = publish_images(
-        text,
-        processed_urls
-    )
-
-    return bool(result)
-
-
-def main():
-
-    state = load_state()
-
-    posts = scrape_profile()
-
-    if not posts:
-
-        print(
-            "No posts found."
-        )
-
-        return
-
-    processed = set(
-        state.get(
-            "processed_ids",
-            []
-        )
-    )
-
-    # --------------------------------------------------------
-    # FIRST RUN
-    # --------------------------------------------------------
-
-    if not state.get(
-        "initialized",
-        False
-    ):
-
-        print()
-        print(
-            "FIRST RUN:"
-        )
-
-        print(
-            "Marking existing posts "
-            "as processed."
-        )
-
-        for post in posts:
-
-            processed.add(
-                post["id"]
-            )
-
-        state["processed_ids"] = list(
-            processed
-        )
-
-        state["initialized"] = True
-
-        save_state(state)
-
-        print(
-            "Initialization complete."
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # NEW POSTS
-    # --------------------------------------------------------
-
-    new_posts = [
-        post
-        for post in posts
-        if post["id"] not in processed
-    ]
-
-    print()
-    print(
-        "NEW POSTS:",
-        len(new_posts)
-    )
-
-    new_posts.reverse()
-
-    for post in new_posts:
-
-        print()
-        print("=" * 50)
-
-        print(
-            "NEW POST:",
-            post["id"]
-        )
-
-        print(
-            "SOURCE:",
-            post["webLink"]
-        )
-
-        print(
-            "IMAGES:",
-            len(post.get("images", []))
-        )
-
-        try:
-
-            success = process_post(post)
-
-            if success:
-
-                processed.add(
-                    post["id"]
-                )
-
-                state["processed_ids"] = list(
-                    processed
-                )
-
-                save_state(state)
-
-                print(
-                    "SUCCESS:",
-                    post["id"]
-                )
-
-            else:
-
-                print(
-                    "NOT MARKED PROCESSED."
-                )
-
-        except Exception as e:
-
-            print(
-                "POST FAILED:",
-                repr(e)
-            )
-
-            print(
-                "It will be retried "
-                "on the next run."
-            )
-
-    save_state(state)
+    print("=" * 80)
+    print("DEBUG COMPLETE")
+    print("=" * 80)
 
 
 if __name__ == "__main__":
