@@ -1,281 +1,618 @@
+import json
 import os
 import time
-import mimetypes
 from pathlib import Path
 
-import requests
+from playwright.sync_api import sync_playwright
+
+from binance_square import (
+    download_image,
+    upload_one_image,
+    publish_text,
+    publish_images,
+)
 
 
-API_KEY = os.environ.get("BINANCE_SQUARE_OPENAPI_KEY")
+SOURCE_AUTHOR = os.getenv(
+    "SOURCE_AUTHOR",
+    "TF_bnb"
+)
 
-BASE = "https://www.binance.com"
+PROFILE_URL = (
+    "https://www.binance.com/en/square/profile/"
+    + SOURCE_AUTHOR
+)
 
-HEADERS = {
-    "X-Square-OpenAPI-Key": API_KEY or "",
-    "Content-Type": "application/json",
-    "clienttype": "binanceSkill",
-}
+STATE_FILE = Path(
+    "src/state.json"
+)
 
-
-def check_key():
-    if not API_KEY:
-        raise RuntimeError(
-            "BINANCE_SQUARE_OPENAPI_KEY GitHub Secret is missing."
-        )
+MEDIA_DIR = Path(
+    "tmp_media"
+)
 
 
-def download_image(url, directory, index):
-    directory = Path(directory)
-    directory.mkdir(parents=True, exist_ok=True)
+def load_state():
 
-    response = requests.get(
-        url,
-        timeout=30,
-        headers={
-            "User-Agent": "Mozilla/5.0"
+    if not STATE_FILE.exists():
+
+        return {
+            "initialized": False,
+            "processed_ids": []
         }
-    )
 
-    response.raise_for_status()
+    try:
 
-    content_type = response.headers.get(
-        "content-type",
-        "image/jpeg"
-    )
-
-    extension = mimetypes.guess_extension(
-        content_type.split(";")[0]
-    ) or ".jpg"
-
-    path = directory / f"image_{index}{extension}"
-
-    path.write_bytes(response.content)
-
-    return path
-
-
-def presign_image(path):
-    filename = path.name
-
-    # Current Square OpenAPI media flow.
-    endpoint = (
-        BASE
-        + "/bapi/composite/v2/public/pgc/openApi/image/presignedUrl"
-    )
-
-    response = requests.post(
-        endpoint,
-        headers=HEADERS,
-        json={
-            "imageName": filename
-        },
-        timeout=30
-    )
-
-    response.raise_for_status()
-
-    data = response.json()
-
-    if data.get("code") not in (
-        "000000",
-        0,
-        None
-    ):
-        raise RuntimeError(
-            f"Binance presign failed: {data}"
+        return json.loads(
+            STATE_FILE.read_text(
+                encoding="utf-8"
+            )
         )
 
-    payload = data.get("data") or {}
+    except Exception:
 
-    presigned_url = payload.get(
-        "presignedUrl"
+        return {
+            "initialized": False,
+            "processed_ids": []
+        }
+
+
+def save_state(state):
+
+    STATE_FILE.parent.mkdir(
+        parents=True,
+        exist_ok=True
     )
 
-    file_ticket = payload.get(
-        "fileTicket"
+    state["processed_ids"] = list(
+        dict.fromkeys(
+            state.get(
+                "processed_ids",
+                []
+            )
+        )
+    )[-500:]
+
+    STATE_FILE.write_text(
+        json.dumps(
+            state,
+            indent=2,
+            ensure_ascii=False
+        ),
+        encoding="utf-8"
     )
 
-    if not presigned_url:
-        raise RuntimeError(
-            f"No presignedUrl returned: {data}"
+
+def extract_visible_posts(page):
+
+    posts = {}
+
+    links = page.locator(
+        'a[href*="/square/post/"]'
+    )
+
+    count = links.count()
+
+    for i in range(count):
+
+        try:
+
+            link = links.nth(i)
+
+            href = link.get_attribute(
+                "href"
+            )
+
+            if not href:
+                continue
+
+            post_id = (
+                href.rstrip("/")
+                .split("/")
+                [-1]
+            )
+
+            if not post_id.isdigit():
+                continue
+
+            if post_id in posts:
+                continue
+
+            # Find the nearest useful container.
+            container = link.locator(
+                "xpath=ancestor::article[1]"
+            )
+
+            if container.count() == 0:
+
+                container = link.locator(
+                    "xpath=ancestor::div[1]"
+                )
+
+            try:
+
+                text = container.inner_text(
+                    timeout=2000
+                )
+
+            except Exception:
+
+                text = link.inner_text(
+                    timeout=2000
+                )
+
+            images = []
+
+            try:
+
+                imgs = container.locator(
+                    "img"
+                )
+
+                img_count = imgs.count()
+
+                for j in range(
+                    min(
+                        img_count,
+                        8
+                    )
+                ):
+
+                    src = imgs.nth(j).get_attribute(
+                        "src"
+                    )
+
+                    if not src:
+                        continue
+
+                    if (
+                        src.startswith(
+                            "data:"
+                        )
+                    ):
+                        continue
+
+                    if src not in images:
+                        images.append(src)
+
+            except Exception:
+                pass
+
+            if href.startswith("/"):
+
+                href = (
+                    "https://www.binance.com"
+                    + href
+                )
+
+            posts[post_id] = {
+                "id": post_id,
+                "webLink": href,
+                "content": text.strip(),
+                "images": images[:4]
+            }
+
+        except Exception:
+            continue
+
+    return posts
+
+
+def scrape_profile():
+
+    print("=" * 60)
+    print("BINANCE SQUARE TF_BNB SCRAPER")
+    print("=" * 60)
+
+    print(
+        "Profile:",
+        SOURCE_AUTHOR
+    )
+
+    posts = {}
+
+    with sync_playwright() as p:
+
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-dev-shm-usage"
+            ]
         )
 
-    return presigned_url, file_ticket
-
-
-def upload_image(path, presigned_url):
-    content_type = (
-        mimetypes.guess_type(
-            path.name
-        )[0]
-        or "image/jpeg"
-    )
-
-    with open(path, "rb") as f:
-
-        response = requests.put(
-            presigned_url,
-            data=f,
-            headers={
-                "Content-Type": content_type
+        page = browser.new_page(
+            viewport={
+                "width": 1280,
+                "height": 900
             },
-            timeout=120
-        )
-
-    response.raise_for_status()
-
-
-def wait_for_image(file_ticket):
-    endpoint = (
-        BASE
-        + "/bapi/composite/v2/public/pgc/openApi/image/imageStatus"
-    )
-
-    for attempt in range(10):
-
-        response = requests.post(
-            endpoint,
-            headers=HEADERS,
-            json={
-                "fileTicket": file_ticket
-            },
-            timeout=30
-        )
-
-        response.raise_for_status()
-
-        data = response.json()
-
-        payload = data.get(
-            "data"
-        ) or {}
-
-        status = payload.get(
-            "status"
+            user_agent=(
+                "Mozilla/5.0 "
+                "(Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 "
+                "(KHTML, like Gecko) "
+                "Chrome/140.0.0.0 "
+                "Safari/537.36"
+            )
         )
 
         print(
-            f"Image processing: "
-            f"{attempt + 1}/10 status={status}"
+            "Opening profile..."
         )
 
-        if status == 1:
+        page.goto(
+            PROFILE_URL,
+            wait_until="domcontentloaded",
+            timeout=60000
+        )
 
-            image_url = (
-                payload.get("imageUrl")
-                or payload.get("url")
+        time.sleep(7)
+
+        print(
+            "Page:",
+            page.title()
+        )
+
+        for scroll in range(12):
+
+            visible = extract_visible_posts(
+                page
             )
 
-            if not image_url:
-                raise RuntimeError(
-                    f"Image processed but URL missing: {data}"
+            before = len(posts)
+
+            posts.update(
+                visible
+            )
+
+            print(
+                f"Scroll {scroll + 1}/12 | "
+                f"visible={len(visible)} | "
+                f"total={len(posts)}"
+            )
+
+            page.mouse.wheel(
+                0,
+                2500
+            )
+
+            time.sleep(2)
+
+            if len(posts) == before:
+
+                # Give Binance another moment
+                # before deciding we've reached
+                # the end.
+                time.sleep(3)
+
+                visible = extract_visible_posts(
+                    page
                 )
 
-            return image_url
+                posts.update(
+                    visible
+                )
 
-        time.sleep(3)
+        browser.close()
 
-    raise RuntimeError(
-        "Image processing timed out."
+    result = list(
+        posts.values()
     )
 
-
-def upload_one_image(path):
-
+    print()
     print(
-        f"Uploading image: {path.name}"
+        "TOTAL POSTS FOUND:",
+        len(result)
     )
 
-    presigned_url, file_ticket = (
-        presign_image(path)
+    for post in result[:5]:
+
+        print()
+        print(
+            "POST:",
+            post["id"]
+        )
+
+        print(
+            "IMAGES:",
+            len(
+                post["images"]
+            )
+        )
+
+    return result
+
+
+def process_post(post):
+
+    text = post["content"].strip()
+
+    if not text:
+        print(
+            "Skipping empty post:",
+            post["id"]
+        )
+        return False
+
+    image_urls = post.get(
+        "images",
+        []
     )
 
-    upload_image(
-        path,
-        presigned_url
-    )
-
-    return wait_for_image(
-        file_ticket
-    )
-
-
-def publish_text(text):
-
-    check_key()
-
-    endpoint = (
-        BASE
-        + "/bapi/composite/v1/public/pgc/openApi/content/add"
-    )
-
-    payload = {
-        "contentType": 1,
-        "bodyTextOnly": text,
-        "isPublish": True
-    }
-
-    response = requests.post(
-        endpoint,
-        headers=HEADERS,
-        json=payload,
-        timeout=60
-    )
-
-    print(
-        "Publish HTTP:",
-        response.status_code
-    )
-
-    data = response.json()
-
-    print(
-        "Publish response:",
-        data
-    )
-
-    return data
-
-
-def publish_images(text, image_urls):
-
-    check_key()
+    # --------------------------------------------------------
+    # TEXT ONLY
+    # --------------------------------------------------------
 
     if not image_urls:
-        return publish_text(text)
 
-    if len(image_urls) > 4:
-        image_urls = image_urls[:4]
+        print(
+            "Publishing text-only post..."
+        )
 
-    endpoint = (
-        BASE
-        + "/bapi/composite/v1/public/pgc/openApi/content/add"
-    )
+        result = publish_text(
+            text
+        )
 
-    payload = {
-        "contentType": 1,
-        "bodyTextOnly": text,
-        "imageList": image_urls,
-        "isPublish": True
-    }
+        return bool(result)
 
-    response = requests.post(
-        endpoint,
-        headers=HEADERS,
-        json=payload,
-        timeout=60
-    )
+    # --------------------------------------------------------
+    # IMAGE POST
+    # --------------------------------------------------------
 
     print(
-        "Publish HTTP:",
-        response.status_code
+        f"Found {len(image_urls)} image(s)."
     )
 
-    data = response.json()
+    MEDIA_DIR.mkdir(
+        parents=True,
+        exist_ok=True
+    )
 
+    local_files = []
+
+    for index, url in enumerate(
+        image_urls[:4],
+        start=1
+    ):
+
+        try:
+
+            path = download_image(
+                url,
+                MEDIA_DIR,
+                index
+            )
+
+            local_files.append(
+                path
+            )
+
+        except Exception as e:
+
+            print(
+                "Image download failed:",
+                e
+            )
+
+    # If media couldn't be downloaded,
+    # DO NOT silently publish text-only.
+    if not local_files:
+
+        print(
+            "All image downloads failed."
+        )
+
+        print(
+            "Publishing text-only."
+        )
+
+        result = publish_text(
+            text
+        )
+
+        return bool(result)
+
+    processed_urls = []
+
+    for path in local_files:
+
+        try:
+
+            uploaded_url = (
+                upload_one_image(
+                    path
+                )
+            )
+
+            processed_urls.append(
+                uploaded_url
+            )
+
+        except Exception as e:
+
+            print(
+                "Binance image upload failed:",
+                e
+            )
+
+    if not processed_urls:
+
+        print(
+            "No images successfully uploaded."
+        )
+
+        return False
+
+    result = publish_images(
+        text,
+        processed_urls
+    )
+
+    return bool(result)
+
+
+def main():
+
+    state = load_state()
+
+    posts = scrape_profile()
+
+    if not posts:
+
+        print(
+            "No posts found."
+        )
+
+        return
+
+    processed = set(
+        state.get(
+            "processed_ids",
+            []
+        )
+    )
+
+    # --------------------------------------------------------
+    # FIRST RUN
+    # --------------------------------------------------------
+
+    if not state.get(
+        "initialized",
+        False
+    ):
+
+        print()
+        print(
+            "FIRST RUN:"
+        )
+
+        print(
+            "Marking existing posts "
+            "as processed."
+        )
+
+        for post in posts:
+
+            processed.add(
+                post["id"]
+            )
+
+        state[
+            "processed_ids"
+        ] = list(
+            processed
+        )
+
+        state[
+            "initialized"
+        ] = True
+
+        save_state(
+            state
+        )
+
+        print(
+            "Initialization complete."
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # NEW POSTS
+    # --------------------------------------------------------
+
+    new_posts = [
+        post
+        for post in posts
+        if post["id"]
+        not in processed
+    ]
+
+    print()
     print(
-        "Publish response:",
-        data
+        "NEW POSTS:",
+        len(new_posts)
     )
 
-    return data
+    # Oldest first.
+    new_posts.reverse()
+
+    for post in new_posts:
+
+        print()
+        print(
+            "=" * 50
+        )
+
+        print(
+            "NEW POST:",
+            post["id"]
+        )
+
+        print(
+            "SOURCE:",
+            post["webLink"]
+        )
+
+        print(
+            "IMAGES:",
+            len(
+                post.get(
+                    "images",
+                    []
+                )
+            )
+        )
+
+        try:
+
+            success = process_post(
+                post
+            )
+
+            if success:
+
+                processed.add(
+                    post["id"]
+                )
+
+                state[
+                    "processed_ids"
+                ] = list(
+                    processed
+                )
+
+                save_state(
+                    state
+                )
+
+                print(
+                    "SUCCESS:",
+                    post["id"]
+                )
+
+            else:
+
+                print(
+                    "NOT MARKED PROCESSED."
+                )
+
+        except Exception as e:
+
+            print(
+                "POST FAILED:",
+                repr(e)
+            )
+
+            print(
+                "It will be retried "
+                "on the next run."
+            )
+
+    save_state(
+        state
+    )
+
+
+if __name__ == "__main__":
+    main()
