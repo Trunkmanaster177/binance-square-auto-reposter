@@ -1,7 +1,9 @@
 import json
 import os
+import re
 import time
 from pathlib import Path
+from urllib.parse import urljoin
 
 from playwright.sync_api import sync_playwright
 
@@ -13,15 +15,53 @@ from binance_square import (
 )
 
 
-SOURCE_AUTHOR = os.getenv("SOURCE_AUTHOR", "TF_bnb")
+# ============================================================
+# CONFIG
+# ============================================================
+
+SOURCE_AUTHOR = os.getenv(
+    "SOURCE_AUTHOR",
+    "TF_bnb"
+)
+
+BASE_URL = "https://www.binance.com"
 
 PROFILE_URL = (
-    "https://www.binance.com/en/square/profile/"
-    + SOURCE_AUTHOR
+    f"{BASE_URL}/en/square/profile/{SOURCE_AUTHOR}"
 )
 
 STATE_FILE = Path("src/state.json")
+
 MEDIA_DIR = Path("tmp_media")
+
+MAX_POSTS = 50
+MAX_IMAGES_PER_POST = 4
+
+SCRAPE_RETRIES = 4
+
+SCROLL_COUNT = 12
+SCROLL_PIXELS = 2500
+
+SCROLL_WAIT = 2
+
+PAGE_WAIT = 7
+
+
+# ============================================================
+# IMAGE URL PATTERNS
+# ============================================================
+
+# Square user-uploaded images normally appear under this path.
+PGC_IMAGE_PATTERN = re.compile(
+    r'https?://(?:public|bin)\.bnbstatic\.com/image/pgc/'
+    r'[A-Za-z0-9_./:%?=&-]+'
+)
+
+# Also support protocol-relative URLs.
+PGC_IMAGE_PATTERN_PROTOCOL_RELATIVE = re.compile(
+    r'//(?:public|bin)\.bnbstatic\.com/image/pgc/'
+    r'[A-Za-z0-9_./:%?=&-]+'
+)
 
 
 # ============================================================
@@ -31,20 +71,41 @@ MEDIA_DIR = Path("tmp_media")
 def load_state():
 
     if not STATE_FILE.exists():
+
         return {
             "initialized": False,
             "processed_ids": []
         }
 
     try:
-        return json.loads(
+
+        data = json.loads(
             STATE_FILE.read_text(
                 encoding="utf-8"
             )
         )
 
+        if not isinstance(data, dict):
+            raise ValueError("Invalid state format")
+
+        data.setdefault(
+            "initialized",
+            False
+        )
+
+        data.setdefault(
+            "processed_ids",
+            []
+        )
+
+        return data
+
     except Exception as e:
-        print("State read error:", repr(e))
+
+        print(
+            "WARNING: Could not read state.json:",
+            repr(e)
+        )
 
         return {
             "initialized": False,
@@ -59,11 +120,23 @@ def save_state(state):
         exist_ok=True
     )
 
-    state["processed_ids"] = list(
+    processed = state.get(
+        "processed_ids",
+        []
+    )
+
+    # Remove duplicates while preserving order.
+    processed = list(
         dict.fromkeys(
-            state.get("processed_ids", [])
+            str(x)
+            for x in processed
         )
-    )[-500:]
+    )
+
+    # Keep the last 500 IDs.
+    processed = processed[-500:]
+
+    state["processed_ids"] = processed
 
     STATE_FILE.write_text(
         json.dumps(
@@ -76,6 +149,263 @@ def save_state(state):
 
 
 # ============================================================
+# URL HELPERS
+# ============================================================
+
+def normalize_url(url):
+
+    if not url:
+        return None
+
+    url = url.strip()
+
+    if url.startswith("//"):
+        return "https:" + url
+
+    if url.startswith("/"):
+        return urljoin(
+            BASE_URL,
+            url
+        )
+
+    return url
+
+
+def is_valid_post_image(url):
+
+    if not url:
+        return False
+
+    url = normalize_url(url)
+
+    if not url:
+        return False
+
+    lower = url.lower()
+
+    # We specifically want Square PGC uploads.
+    if "/image/pgc/" not in lower:
+        return False
+
+    # Ignore obvious UI/asset files.
+    blocked_terms = [
+        "cookie",
+        "logo",
+        "brand",
+        "static/content/square/images",
+        "static/content/",
+        "admin_mgs_image_upload",
+    ]
+
+    for term in blocked_terms:
+
+        if term in lower:
+            return False
+
+    # Basic image extension check.
+    # Binance sometimes omits extensions, so don't require one.
+    valid_extensions = (
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".webp",
+        ".gif"
+    )
+
+    if (
+        not any(
+            lower.split("?")[0].endswith(ext)
+            for ext in valid_extensions
+        )
+    ):
+        # PGC URLs are still accepted because Binance
+        # can serve extensionless/image-transformed URLs.
+        pass
+
+    return True
+
+
+# ============================================================
+# IMAGE EXTRACTION
+# ============================================================
+
+def extract_pgc_images_from_html(html):
+
+    if not html:
+        return []
+
+    found = []
+
+    # Normal absolute URLs.
+    for match in PGC_IMAGE_PATTERN.findall(html):
+
+        url = normalize_url(match)
+
+        if (
+            url
+            and is_valid_post_image(url)
+            and url not in found
+        ):
+
+            found.append(url)
+
+    # Protocol-relative URLs.
+    for match in (
+        PGC_IMAGE_PATTERN_PROTOCOL_RELATIVE.findall(
+            html
+        )
+    ):
+
+        url = normalize_url(match)
+
+        if (
+            url
+            and is_valid_post_image(url)
+            and url not in found
+        ):
+
+            found.append(url)
+
+    return found
+
+
+def extract_images_from_container(container):
+
+    images = []
+
+    try:
+
+        html = container.evaluate(
+            "(el) => el.outerHTML"
+        )
+
+        images.extend(
+            extract_pgc_images_from_html(
+                html
+            )
+        )
+
+    except Exception as e:
+
+        print(
+            "Container HTML extraction failed:",
+            repr(e)
+        )
+
+    # --------------------------------------------------------
+    # Also inspect image elements.
+    # --------------------------------------------------------
+
+    try:
+
+        imgs = container.locator("img")
+
+        count = imgs.count()
+
+        for i in range(count):
+
+            try:
+
+                img = imgs.nth(i)
+
+                attributes = [
+                    "src",
+                    "data-src",
+                    "data-original",
+                    "data-lazy-src"
+                ]
+
+                for attribute in attributes:
+
+                    value = img.get_attribute(
+                        attribute
+                    )
+
+                    if not value:
+                        continue
+
+                    url = normalize_url(
+                        value
+                    )
+
+                    if (
+                        url
+                        and is_valid_post_image(url)
+                        and url not in images
+                    ):
+
+                        images.append(url)
+
+            except Exception:
+                continue
+
+    except Exception:
+        pass
+
+    return images[:MAX_IMAGES_PER_POST]
+
+
+# ============================================================
+# POST CONTAINER
+# ============================================================
+
+def find_post_container(link):
+
+    # Binance Square's structure can change, so use
+    # several levels rather than relying on one class name.
+
+    selectors = [
+        "xpath=ancestor::article[1]",
+        "xpath=ancestor::div[contains(@class,'feed-card')][1]",
+        "xpath=ancestor::div[contains(@class,'FeedBuzzBaseViewRoot')][1]",
+        "xpath=ancestor::div[contains(@class,'feed-buzz-card-base-view')][1]",
+        "xpath=ancestor::div[contains(@class,'card-content-box')][1]",
+    ]
+
+    for selector in selectors:
+
+        try:
+
+            locator = link.locator(
+                selector
+            )
+
+            if locator.count() > 0:
+
+                container = locator.first
+
+                try:
+
+                    html_length = len(
+                        container.evaluate(
+                            "(el) => el.outerHTML"
+                        )
+                    )
+
+                except Exception:
+
+                    html_length = 0
+
+                # Prefer a reasonably large container.
+                if html_length >= 1000:
+                    return container
+
+        except Exception:
+            continue
+
+    # Last fallback.
+    try:
+
+        return link.locator(
+            "xpath=ancestor::div[1]"
+        )
+
+    except Exception:
+
+        return link
+
+
+# ============================================================
 # EXTRACT POSTS
 # ============================================================
 
@@ -83,11 +413,22 @@ def extract_visible_posts(page, debug=False):
 
     posts = {}
 
-    links = page.locator(
-        'a[href*="/square/post/"]'
-    )
+    try:
 
-    count = links.count()
+        links = page.locator(
+            'a[href*="/square/post/"]'
+        )
+
+        count = links.count()
+
+    except Exception as e:
+
+        print(
+            "Could not locate post links:",
+            repr(e)
+        )
+
+        return posts
 
     for i in range(count):
 
@@ -95,58 +436,36 @@ def extract_visible_posts(page, debug=False):
 
             link = links.nth(i)
 
-            href = link.get_attribute("href")
+            href = link.get_attribute(
+                "href"
+            )
 
             if not href:
                 continue
 
-            post_id = (
-                href.rstrip("/")
-                .split("/")[-1]
+            href = normalize_url(
+                href
             )
 
-            if not post_id.isdigit():
+            if not href:
                 continue
+
+            match = re.search(
+                r"/square/post/(\d+)",
+                href
+            )
+
+            if not match:
+                continue
+
+            post_id = match.group(1)
 
             if post_id in posts:
                 continue
 
-            # Find Binance's actual feed card.
-            container = link.locator(
-                "xpath=ancestor::div[contains(@class, 'feed-buzz-card-base-view')][1]"
+            container = find_post_container(
+                link
             )
-
-            if container.count() == 0:
-
-                container = link
-
-                for _ in range(10):
-
-                    try:
-
-                        parent = container.locator(
-                            "xpath=.."
-                        )
-
-                        parent_class = (
-                            parent.get_attribute(
-                                "class"
-                            )
-                            or ""
-                        )
-
-                        if (
-                            "feed-buzz-card-base-view"
-                            in parent_class
-                        ):
-
-                            container = parent
-                            break
-
-                        container = parent
-
-                    except Exception:
-                        break
 
             # ------------------------------------------------
             # TEXT
@@ -170,168 +489,223 @@ def extract_visible_posts(page, debug=False):
 
                     text = ""
 
+            text = text.strip()
+
             # ------------------------------------------------
             # IMAGES
             # ------------------------------------------------
 
-            images = []
+            images = extract_images_from_container(
+                container
+            )
 
-            try:
+            # ------------------------------------------------
+            # DEBUG
+            # ------------------------------------------------
 
-                imgs = container.locator("img")
+            if debug and i == 0:
 
-                img_count = imgs.count()
+                print()
+                print(
+                    "=" * 70
+                )
 
-                if debug:
+                print(
+                    "IMAGE DEBUG"
+                )
 
-                    print()
-                    print("=" * 60)
-                    print("IMAGE DEBUG")
-                    print("Post ID:", post_id)
-                    print("IMG ELEMENTS FOUND:", img_count)
+                print(
+                    "=" * 70
+                )
 
-                for j in range(
-                    min(img_count, 10)
-                ):
+                print(
+                    "Post ID:",
+                    post_id
+                )
 
-                    img = imgs.nth(j)
+                print(
+                    "IMG ELEMENTS:",
+                    end=" "
+                )
 
-                    candidates = []
+                try:
 
-                    # Normal image attributes.
-                    for attr in [
-                        "src",
-                        "data-src",
-                        "data-original",
-                        "data-lazy-src",
-                        "data-url",
-                        "data-image"
-                    ]:
-
-                        try:
-
-                            value = img.get_attribute(
-                                attr
-                            )
-
-                            if value:
-                                candidates.append(
-                                    value
-                                )
-
-                        except Exception:
-                            pass
-
-                    # srcset.
-                    try:
-
-                        srcset = img.get_attribute(
-                            "srcset"
-                        )
-
-                        if srcset:
-
-                            for item in srcset.split(","):
-
-                                item = item.strip()
-
-                                if not item:
-                                    continue
-
-                                url = item.split(
-                                    " "
-                                )[0]
-
-                                if url:
-                                    candidates.append(
-                                        url
-                                    )
-
-                    except Exception:
-                        pass
-
-                    for url in candidates:
-
-                        if not url:
-                            continue
-
-                        if url.startswith("data:"):
-                            continue
-
-                        if "cookielaw.org" in url:
-                            continue
-
-                        if url not in images:
-                            images.append(url)
-
-                # Prefer actual Square PGC images.
-                pgc_images = [
-                    url
-                    for url in images
-                    if "public.bnbstatic.com/image/pgc/"
-                    in url
-                ]
-
-                if pgc_images:
-
-                    images = pgc_images
-
-                else:
-
-                    # Fallback for Binance CDN.
-                    images = [
-                        url
-                        for url in images
-                        if (
-                            "bnbstatic.com" in url
-                            or "binance.com" in url
-                        )
-                    ]
-
-                images = images[:4]
-
-                if debug:
-
-                    print("FINAL IMAGE URLS:")
-
-                    for image in images:
-                        print("IMAGE:", image)
-
-                    print("=" * 60)
-
-            except Exception as e:
-
-                if debug:
                     print(
-                        "Image extraction error:",
-                        repr(e)
+                        container.locator(
+                            "img"
+                        ).count()
                     )
 
-            # ------------------------------------------------
-            # NORMALIZE LINK
-            # ------------------------------------------------
+                except Exception:
 
-            if href.startswith("/"):
-                href = (
-                    "https://www.binance.com"
-                    + href
+                    print("?")
+
+                print(
+                    "PGC IMAGE URLS:",
+                    len(images)
                 )
+
+                for image in images:
+
+                    print(
+                        "IMAGE:",
+                        image
+                    )
+
+                print(
+                    "=" * 70
+                )
+                print()
 
             posts[post_id] = {
                 "id": post_id,
                 "webLink": href,
-                "content": text.strip(),
+                "content": text,
                 "images": images
             }
 
         except Exception as e:
 
-            print(
-                "Post extraction error:",
-                repr(e)
-            )
+            # One malformed card should never stop
+            # the entire scraper.
+            continue
 
     return posts
+
+
+# ============================================================
+# PAGE VALIDATION
+# ============================================================
+
+def page_is_valid(page):
+
+    try:
+
+        title = page.title()
+
+    except Exception:
+
+        title = ""
+
+    try:
+
+        body_text = page.locator(
+            "body"
+        ).inner_text(
+            timeout=5000
+        )
+
+    except Exception:
+
+        body_text = ""
+
+    combined = (
+        (title or "")
+        + "\n"
+        + (body_text or "")
+    ).lower()
+
+    # Binance CDN/WAF error page.
+    error_phrases = [
+        "error: the request could not be satisfied",
+        "request could not be satisfied",
+        "request blocked",
+        "access denied",
+        "403 forbidden"
+    ]
+
+    for phrase in error_phrases:
+
+        if phrase in combined:
+
+            print(
+                "BINANCE PAGE ERROR DETECTED:",
+                phrase
+            )
+
+            return False
+
+    # A valid profile page should contain Square/post links.
+    try:
+
+        post_count = page.locator(
+            'a[href*="/square/post/"]'
+        ).count()
+
+    except Exception:
+
+        post_count = 0
+
+    if post_count > 0:
+        return True
+
+    # The page may still be loading.
+    # Check the URL/title before declaring failure.
+    try:
+
+        current_url = page.url
+
+    except Exception:
+
+        current_url = ""
+
+    if (
+        "/square/profile/" in current_url
+        and "binance.com" in current_url
+    ):
+
+        # Give dynamic content a chance.
+        time.sleep(3)
+
+        try:
+
+            post_count = page.locator(
+                'a[href*="/square/post/"]'
+            ).count()
+
+        except Exception:
+
+            post_count = 0
+
+        if post_count > 0:
+            return True
+
+    return False
+
+
+# ============================================================
+# BROWSER SETUP
+# ============================================================
+
+def create_context(browser):
+
+    context = browser.new_context(
+
+        viewport={
+            "width": 1280,
+            "height": 900
+        },
+
+        user_agent=(
+            "Mozilla/5.0 "
+            "(Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 "
+            "(KHTML, like Gecko) "
+            "Chrome/140.0.0.0 "
+            "Safari/537.36"
+        ),
+
+        locale="en-US",
+
+        timezone_id="Asia/Kolkata",
+
+        extra_http_headers={
+            "Accept-Language":
+                "en-US,en;q=0.9"
+        }
+    )
+
+    return context
 
 
 # ============================================================
@@ -344,492 +718,222 @@ def scrape_profile():
     print("BINANCE SQUARE TF_BNB SCRAPER")
     print("=" * 60)
 
-    print("Profile:", SOURCE_AUTHOR)
+    print(
+        "Profile:",
+        SOURCE_AUTHOR
+    )
 
-    posts = {}
+    all_posts = {}
 
     with sync_playwright() as p:
 
         browser = p.chromium.launch(
+
             headless=True,
+
             args=[
                 "--no-sandbox",
-                "--disable-dev-shm-usage"
+                "--disable-dev-shm-usage",
+                "--disable-blink-features=AutomationControlled",
             ]
         )
 
-        page = browser.new_page(
-            viewport={
-                "width": 1280,
-                "height": 900
-            },
-            user_agent=(
-                "Mozilla/5.0 "
-                "(Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 "
-                "(KHTML, like Gecko) "
-                "Chrome/140.0.0.0 "
-                "Safari/537.36"
-            )
-        )
-
-        print("Opening profile...")
-
-        page.goto(
-            PROFILE_URL,
-            wait_until="domcontentloaded",
-            timeout=60000
-        )
-
-        time.sleep(7)
-
-        print(
-            "Page:",
-            page.title()
-        )
-
-        # First extraction with debug.
-        initial = extract_visible_posts(
-            page,
-            debug=True
-        )
-
-        posts.update(initial)
-
-        print(
-            "Initial extraction:",
-            len(posts),
-            "posts"
-        )
-
-        # Scroll and collect.
-        for scroll in range(12):
-
-            visible = extract_visible_posts(
-                page
-            )
-
-            before = len(posts)
-
-            posts.update(visible)
-
-            print(
-                f"Scroll {scroll + 1}/12 | "
-                f"visible={len(visible)} | "
-                f"total={len(posts)}"
-            )
-
-            page.mouse.wheel(
-                0,
-                2500
-            )
-
-            time.sleep(2)
-
-            if len(posts) == before:
-
-                time.sleep(3)
-
-                visible = extract_visible_posts(
-                    page
-                )
-
-                posts.update(visible)
-
-        browser.close()
-
-    result = list(posts.values())
-
-    print()
-    print(
-        "TOTAL POSTS FOUND:",
-        len(result)
-    )
-
-    for post in result[:10]:
-
-        print()
-        print(
-            "POST:",
-            post["id"]
-        )
-
-        print(
-            "IMAGES:",
-            len(post.get("images", []))
-        )
-
-        for image in post.get("images", []):
-            print(
-                "IMAGE:",
-                image
-            )
-
-    return result
-
-
-# ============================================================
-# PROCESS ONE POST
-# ============================================================
-
-def process_post(post):
-
-    post_id = post["id"]
-
-    text = post.get(
-        "content",
-        ""
-    ).strip()
-
-    if not text:
-
-        print(
-            "Skipping empty post:",
-            post_id
-        )
-
-        return False
-
-    image_urls = post.get(
-        "images",
-        []
-    )
-
-    # --------------------------------------------------------
-    # TEXT ONLY
-    # --------------------------------------------------------
-
-    if not image_urls:
-
-        print(
-            "No images found."
-        )
-
-        print(
-            "Publishing text-only post..."
-        )
-
-        result = publish_text(text)
-
-        print(
-            "Text publish response:",
-            result
-        )
-
-        if isinstance(result, dict):
-
-            code = result.get("code")
-
-            return code in (
-                "000000",
-                0,
-                None
-            )
-
-        return bool(result)
-
-    # --------------------------------------------------------
-    # IMAGE POST
-    # --------------------------------------------------------
-
-    print(
-        f"Found {len(image_urls)} image(s)."
-    )
-
-    MEDIA_DIR.mkdir(
-        parents=True,
-        exist_ok=True
-    )
-
-    local_files = []
-
-    # Download.
-    for index, url in enumerate(
-        image_urls[:4],
-        start=1
-    ):
+        success = False
 
         try:
 
-            print(
-                f"Downloading image {index}:",
-                url
-            )
+            for attempt in range(
+                1,
+                SCRAPE_RETRIES + 1
+            ):
 
-            path = download_image(
-                url,
-                MEDIA_DIR,
-                index
-            )
-
-            local_files.append(path)
-
-            print(
-                "Downloaded:",
-                path
-            )
-
-        except Exception as e:
-
-            print(
-                "Image download failed:",
-                repr(e)
-            )
-
-    if not local_files:
-
-        print(
-            "All image downloads failed."
-        )
-
-        print(
-            "NOT publishing text-only."
-        )
-
-        return False
-
-    # Upload to Binance.
-    processed_urls = []
-
-    for path in local_files:
-
-        try:
-
-            print(
-                "Uploading:",
-                path
-            )
-
-            uploaded_url = upload_one_image(
-                path
-            )
-
-            if uploaded_url:
-
-                processed_urls.append(
-                    uploaded_url
-                )
-
+                print()
                 print(
-                    "Uploaded URL:",
-                    uploaded_url
+                    f"PROFILE ATTEMPT "
+                    f"{attempt}/{SCRAPE_RETRIES}"
                 )
 
-        except Exception as e:
+                context = None
 
-            print(
-                "Binance image upload failed:",
-                repr(e)
-            )
+                try:
 
-    if not processed_urls:
+                    context = create_context(
+                        browser
+                    )
 
-        print(
-            "No images successfully uploaded."
+                    page = context.new_page()
+
+                    print(
+                        "Opening profile..."
+                    )
+
+                    page.goto(
+                        PROFILE_URL,
+                        wait_until="domcontentloaded",
+                        timeout=60000
+                    )
+
+                    time.sleep(
+                        PAGE_WAIT
+                    )
+
+                    try:
+
+                        print(
+                            "Page:",
+                            page.title()
+                        )
+
+                    except Exception:
+
+                        pass
+
+                    # ------------------------------------------------
+                    # Detect Binance error/WAF page.
+                    # ------------------------------------------------
+
+                    if not page_is_valid(
+                        page
+                    ):
+
+                        print(
+                            "Profile page is not usable."
+                        )
+
+                        if attempt < SCRAPE_RETRIES:
+
+                            print(
+                                "Retrying in "
+                                f"{attempt * 3} seconds..."
+                            )
+
+                            time.sleep(
+                                attempt * 3
+                            )
+
+                            context.close()
+
+                            continue
+
+                        raise RuntimeError(
+                            "Binance profile could not "
+                            "be loaded after retries."
+                        )
+
+                    # ------------------------------------------------
+                    # Initial extraction.
+                    # ------------------------------------------------
+
+                    visible = extract_visible_posts(
+                        page,
+                        debug=True
+                    )
+
+                    all_posts.update(
+                        visible
+                    )
+
+                    print(
+                        "Initial extraction:",
+                        len(all_posts),
+                        "posts"
+                    )
+
+                    # ------------------------------------------------
+                    # Scroll.
+                    # ------------------------------------------------
+
+                    for scroll in range(
+                        SCROLL_COUNT
+                    ):
+
+                        visible = extract_visible_posts(
+                            page
+                        )
+
+                        before = len(
+                            all_posts
+                        )
+
+                        all_posts.update(
+                            visible
+                        )
+
+                        print(
+                            f"Scroll {scroll + 1}/"
+                            f"{SCROLL_COUNT} | "
+                            f"visible={len(visible)} | "
+                            f"total={len(all_posts)}"
+                        )
+
+                        page.mouse.wheel(
+                            0,
+                            SCROLL_PIXELS
+                        )
+
+                        time.sleep(
+                            SCROLL_WAIT
+                        )
+
+                        # Occasionally wait a little longer
+                        # for lazy-loaded content.
+                        if (
+                            scroll + 1
+                        ) % 4 == 0:
+
+                            time.sleep(2)
+
+                    success = True
+
+                    context.close()
+
+                    break
+
+                except Exception as e:
+
+                    print()
+                    print(
+                        "SCRAPE ATTEMPT FAILED:",
+                        repr(e)
+                    )
+
+                    if context:
+
+                        try:
+                            context.close()
+                        except Exception:
+                            pass
+
+                    if attempt < SCRAPE_RETRIES:
+
+                        wait_time = (
+                            attempt * 4
+                        )
+
+                        print(
+                            f"Retrying in "
+                            f"{wait_time} seconds..."
+                        )
+
+                        time.sleep(
+                            wait_time
+                        )
+
+                    else:
+
+                        print(
+                            "All scrape attempts failed."
+                        )
+
+        finally:
+
+            browser.close()
+
+    if not success:
+
+        raise RuntimeError(
+            "Could not obtain a valid Binance Square "
+            "profile page."
         )
 
-        return False
-
-    # Publish.
-    print(
-        "Publishing image post..."
-    )
-
-    result = publish_images(
-        text,
-        processed_urls
-    )
-
-    print(
-        "Publish response:",
-        result
-    )
-
-    if isinstance(result, dict):
-
-        code = result.get("code")
-
-        if code in (
-            "000000",
-            0,
-            None
-        ):
-            return True
-
-        print(
-            "Publish failed with code:",
-            code
-        )
-
-        return False
-
-    return bool(result)
-
-
-# ============================================================
-# MAIN
-# ============================================================
-
-def main():
-
-    state = load_state()
-
-    posts = scrape_profile()
-
-    if not posts:
-
-        print(
-            "No posts found."
-        )
-
-        return
-
-    processed = set(
-        state.get(
-            "processed_ids",
-            []
-        )
-    )
-
-    # --------------------------------------------------------
-    # FIRST RUN
-    # --------------------------------------------------------
-
-    if not state.get(
-        "initialized",
-        False
-    ):
-
-        print()
-        print(
-            "FIRST RUN"
-        )
-
-        print(
-            "Marking existing posts as processed."
-        )
-
-        for post in posts:
-
-            processed.add(
-                post["id"]
-            )
-
-        state["processed_ids"] = list(
-            processed
-        )
-
-        state["initialized"] = True
-
-        save_state(state)
-
-        print(
-            "Initialization complete."
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # FIND NEW POSTS
-    # --------------------------------------------------------
-
-    new_posts = [
-        post
-        for post in posts
-        if post["id"] not in processed
-    ]
-
-    print()
-    print(
-        "NEW POSTS:",
-        len(new_posts)
-    )
-
-    if not new_posts:
-
-        return
-
-    # Oldest first.
-    new_posts.reverse()
-
-    # --------------------------------------------------------
-    # PROCESS
-    # --------------------------------------------------------
-
-    for post in new_posts:
-
-        print()
-        print("=" * 50)
-
-        print(
-            "NEW POST:",
-            post["id"]
-        )
-
-        print(
-            "SOURCE:",
-            post["webLink"]
-        )
-
-        print(
-            "IMAGES:",
-            len(
-                post.get(
-                    "images",
-                    []
-                )
-            )
-        )
-
-        try:
-
-            success = process_post(post)
-
-            if success:
-
-                processed.add(
-                    post["id"]
-                )
-
-                state["processed_ids"] = list(
-                    processed
-                )
-
-                save_state(state)
-
-                print(
-                    "SUCCESS:",
-                    post["id"]
-                )
-
-            else:
-
-                print(
-                    "FAILED:",
-                    post["id"]
-                )
-
-                print(
-                    "NOT marked as processed."
-                )
-
-        except Exception as e:
-
-            print(
-                "POST FAILED:",
-                repr(e)
-            )
-
-            print(
-                "Will retry on next run."
-            )
-
-    save_state(state)
-
-
-# ============================================================
-# ENTRY POINT
-# ============================================================
-
-if __name__ == "__main__":
-    main()
+    re
